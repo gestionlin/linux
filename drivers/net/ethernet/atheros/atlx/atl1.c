@@ -1831,8 +1831,6 @@ static u16 atl1_alloc_rx_buffers(struct atl1_adapter *adapter)
 {
 	struct atl1_rfd_ring *rfd_ring = &adapter->rfd_ring;
 	struct pci_dev *pdev = adapter->pdev;
-	struct page *page;
-	unsigned long offset;
 	struct atl1_buffer *buffer_info, *next_info;
 	struct sk_buff *skb;
 	u16 num_alloc = 0;
@@ -1864,11 +1862,9 @@ static u16 atl1_alloc_rx_buffers(struct atl1_adapter *adapter)
 		buffer_info->alloced = 1;
 		buffer_info->skb = skb;
 		buffer_info->length = (u16) adapter->rx_buffer_len;
-		page = virt_to_page(skb->data);
-		offset = offset_in_page(skb->data);
-		buffer_info->dma = dma_map_page(&pdev->dev, page, offset,
-						adapter->rx_buffer_len,
-						DMA_FROM_DEVICE);
+		buffer_info->dma = dma_map_single(&pdev->dev, skb->data,
+						  adapter->rx_buffer_len,
+						  DMA_FROM_DEVICE);
 		rfd_desc->buffer_addr = cpu_to_le64(buffer_info->dma);
 		rfd_desc->buf_len = cpu_to_le16(adapter->rx_buffer_len);
 		rfd_desc->coalese = 0;
@@ -2186,8 +2182,6 @@ static void atl1_tx_map(struct atl1_adapter *adapter, struct sk_buff *skb,
 	struct atl1_tpd_ring *tpd_ring = &adapter->tpd_ring;
 	struct atl1_buffer *buffer_info;
 	u16 buf_len = skb->len;
-	struct page *page;
-	unsigned long offset;
 	unsigned int nr_frags;
 	unsigned int f;
 	int retval;
@@ -2208,11 +2202,9 @@ static void atl1_tx_map(struct atl1_adapter *adapter, struct sk_buff *skb,
 		/* TSO */
 		hdr_len = skb_tcp_all_headers(skb);
 		buffer_info->length = hdr_len;
-		page = virt_to_page(skb->data);
-		offset = offset_in_page(skb->data);
-		buffer_info->dma = dma_map_page(&adapter->pdev->dev, page,
-						offset, hdr_len,
-						DMA_TO_DEVICE);
+		buffer_info->dma = dma_map_single(&adapter->pdev->dev,
+						  skb->data, hdr_len,
+						  DMA_TO_DEVICE);
 
 		if (++next_to_use == tpd_ring->count)
 			next_to_use = 0;
@@ -2231,14 +2223,12 @@ static void atl1_tx_map(struct atl1_adapter *adapter, struct sk_buff *skb,
 				    (ATL1_MAX_TX_BUF_LEN >=
 				     data_len) ? ATL1_MAX_TX_BUF_LEN : data_len;
 				data_len -= buffer_info->length;
-				page = virt_to_page(skb->data +
-					(hdr_len + i * ATL1_MAX_TX_BUF_LEN));
-				offset = offset_in_page(skb->data +
-					(hdr_len + i * ATL1_MAX_TX_BUF_LEN));
-				buffer_info->dma = dma_map_page(&adapter->pdev->dev,
-								page, offset,
-								buffer_info->length,
-								DMA_TO_DEVICE);
+				buffer_info->dma =
+					dma_map_single(&adapter->pdev->dev,
+						       skb->data + (hdr_len +
+						       i * ATL1_MAX_TX_BUF_LEN),
+						       buffer_info->length,
+						       DMA_TO_DEVICE);
 				if (++next_to_use == tpd_ring->count)
 					next_to_use = 0;
 			}
@@ -2246,11 +2236,9 @@ static void atl1_tx_map(struct atl1_adapter *adapter, struct sk_buff *skb,
 	} else {
 		/* not TSO */
 		buffer_info->length = buf_len;
-		page = virt_to_page(skb->data);
-		offset = offset_in_page(skb->data);
-		buffer_info->dma = dma_map_page(&adapter->pdev->dev, page,
-						offset, buf_len,
-						DMA_TO_DEVICE);
+		buffer_info->dma = dma_map_single(&adapter->pdev->dev,
+						  skb->data, buf_len,
+						  DMA_TO_DEVICE);
 		if (++next_to_use == tpd_ring->count)
 			next_to_use = 0;
 	}

@@ -1639,10 +1639,8 @@ static void ace_load_std_rx_ring(struct net_device *dev, int nr_bufs)
 		if (!skb)
 			break;
 
-		mapping = dma_map_page(&ap->pdev->dev,
-				       virt_to_page(skb->data),
-				       offset_in_page(skb->data),
-				       ACE_STD_BUFSIZE, DMA_FROM_DEVICE);
+		mapping = dma_map_single(&ap->pdev->dev, skb->data,
+					 ACE_STD_BUFSIZE, DMA_FROM_DEVICE);
 		ap->skb->rx_std_skbuff[idx].skb = skb;
 		dma_unmap_addr_set(&ap->skb->rx_std_skbuff[idx],
 				   mapping, mapping);
@@ -1700,10 +1698,8 @@ static void ace_load_mini_rx_ring(struct net_device *dev, int nr_bufs)
 		if (!skb)
 			break;
 
-		mapping = dma_map_page(&ap->pdev->dev,
-				       virt_to_page(skb->data),
-				       offset_in_page(skb->data),
-				       ACE_MINI_BUFSIZE, DMA_FROM_DEVICE);
+		mapping = dma_map_single(&ap->pdev->dev, skb->data,
+					 ACE_MINI_BUFSIZE, DMA_FROM_DEVICE);
 		ap->skb->rx_mini_skbuff[idx].skb = skb;
 		dma_unmap_addr_set(&ap->skb->rx_mini_skbuff[idx],
 				   mapping, mapping);
@@ -1756,10 +1752,8 @@ static void ace_load_jumbo_rx_ring(struct net_device *dev, int nr_bufs)
 		if (!skb)
 			break;
 
-		mapping = dma_map_page(&ap->pdev->dev,
-				       virt_to_page(skb->data),
-				       offset_in_page(skb->data),
-				       ACE_JUMBO_BUFSIZE, DMA_FROM_DEVICE);
+		mapping = dma_map_single(&ap->pdev->dev, skb->data,
+					 ACE_JUMBO_BUFSIZE, DMA_FROM_DEVICE);
 		ap->skb->rx_jumbo_skbuff[idx].skb = skb;
 		dma_unmap_addr_set(&ap->skb->rx_jumbo_skbuff[idx],
 				   mapping, mapping);
@@ -2362,9 +2356,8 @@ ace_map_tx_skb(struct ace_private *ap, struct sk_buff *skb,
 	dma_addr_t mapping;
 	struct tx_ring_info *info;
 
-	mapping = dma_map_page(&ap->pdev->dev, virt_to_page(skb->data),
-			       offset_in_page(skb->data), skb->len,
-			       DMA_TO_DEVICE);
+	mapping = dma_map_single(&ap->pdev->dev, skb->data, skb->len,
+				 DMA_TO_DEVICE);
 
 	info = ap->skb->tx_skbuff + idx;
 	info->skb = tail;

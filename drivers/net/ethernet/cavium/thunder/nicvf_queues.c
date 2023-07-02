@@ -1574,9 +1574,8 @@ int nicvf_sq_append_skb(struct nicvf *nic, struct snd_queue *sq,
 	qentry = nicvf_get_nxt_sqentry(sq, qentry);
 	size = skb_is_nonlinear(skb) ? skb_headlen(skb) : skb->len;
 	/* HW will ensure data coherency, CPU sync not required */
-	dma_addr = dma_map_page_attrs(&nic->pdev->dev, virt_to_page(skb->data),
-				      offset_in_page(skb->data), size,
-				      DMA_TO_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
+	dma_addr = dma_map_single_attrs(&nic->pdev->dev, skb->data, size,
+					DMA_TO_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
 	if (dma_mapping_error(&nic->pdev->dev, dma_addr)) {
 		nicvf_rollback_sq_desc(sq, qentry, subdesc_cnt);
 		return 0;
