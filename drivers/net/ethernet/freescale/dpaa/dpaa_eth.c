@@ -1803,13 +1803,11 @@ static struct sk_buff *sg_fd_to_skb(const struct dpaa_priv *priv,
 	ssize_t fd_off = qm_fd_get_offset(fd);
 	dma_addr_t addr = qm_fd_addr(fd);
 	const struct qm_sg_entry *sgt;
-	struct page *page, *head_page;
 	struct dpaa_bp *dpaa_bp;
 	void *vaddr, *sg_vaddr;
 	int frag_off, frag_len;
 	struct sk_buff *skb;
 	dma_addr_t sg_addr;
-	int page_offset;
 	unsigned int sz;
 	int *count_ptr;
 	int i, j;
@@ -1852,31 +1850,10 @@ static struct sk_buff *sg_fd_to_skb(const struct dpaa_priv *priv,
 			skb_reserve(skb, fd_off);
 			skb_put(skb, qm_sg_entry_get_len(&sgt[i]));
 		} else {
-			/* Not the first S/G entry; all data from buffer will
-			 * be added in an skb fragment; fragment index is offset
-			 * by one since first S/G entry was incorporated in the
-			 * linear part of the skb.
-			 *
-			 * Caution: 'page' may be a tail page.
-			 */
-			page = virt_to_page(sg_vaddr);
-			head_page = virt_to_head_page(sg_vaddr);
-
-			/* Compute offset in (possibly tail) page */
-			page_offset = ((unsigned long)sg_vaddr &
-					(PAGE_SIZE - 1)) +
-				(page_address(page) - page_address(head_page));
-			/* page_offset only refers to the beginning of sgt[i];
-			 * but the buffer itself may have an internal offset.
-			 */
-			frag_off = qm_sg_entry_get_off(&sgt[i]) + page_offset;
+			frag_off = qm_sg_entry_get_off(&sgt[i]);
 			frag_len = qm_sg_entry_get_len(&sgt[i]);
-			/* skb_add_rx_frag() does no checking on the page; if
-			 * we pass it a tail page, we'll end up with
-			 * bad page accounting and eventually with segafults.
-			 */
-			skb_add_rx_frag(skb, i - 1, head_page, frag_off,
-					frag_len, dpaa_bp->size);
+			skb_add_rx_frag_data(skb, i - 1, sg_vaddr + frag_off,
+					     frag_len, dpaa_bp->size);
 		}
 
 		/* Update the pool count for the current {cpu x bpool} */

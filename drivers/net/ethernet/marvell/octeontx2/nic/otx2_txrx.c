@@ -197,7 +197,6 @@ static bool otx2_skb_add_frag(struct otx2_nic *pfvf, struct sk_buff *skb,
 			      u64 iova, int len, struct nix_rx_parse_s *parse,
 			      int qidx)
 {
-	struct page *page;
 	int off = 0;
 	void *va;
 
@@ -215,11 +214,9 @@ static bool otx2_skb_add_frag(struct otx2_nic *pfvf, struct sk_buff *skb,
 		}
 	}
 
-	page = virt_to_page(va);
 	if (likely(skb_shinfo(skb)->nr_frags < MAX_SKB_FRAGS)) {
-		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
-				va - page_address(page) + off,
-				len - off, pfvf->rbsize);
+		skb_add_rx_frag_data(skb, skb_shinfo(skb)->nr_frags,
+				     va + off, len - off, pfvf->rbsize);
 		return true;
 	}
 

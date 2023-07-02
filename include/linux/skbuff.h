@@ -2431,6 +2431,16 @@ static inline void skb_frag_fill_page_desc(skb_frag_t *frag,
 	skb_frag_size_set(frag, size);
 }
 
+static inline void skb_frag_fill_data_desc(skb_frag_t *frag, void *data,
+					   int size)
+{
+	struct page *page = virt_to_head_page(data);
+	int off;
+
+	off = (unsigned char *)data - (unsigned char *)page_address(page);
+	skb_frag_fill_page_desc(frag, page, off, size);
+}
+
 static inline void __skb_fill_page_desc_noacc(struct skb_shared_info *shinfo,
 					      int i, struct page *page,
 					      int off, int size)
@@ -2479,6 +2489,16 @@ static inline void __skb_fill_page_desc(struct sk_buff *skb, int i,
 		skb->pfmemalloc	= true;
 }
 
+static inline void __skb_fill_data_desc(struct sk_buff *skb, int i, void *data,
+					int size)
+{
+	struct page *page = virt_to_head_page(data);
+	int off;
+
+	off = (unsigned char *)data - (unsigned char *)page_address(page);
+	__skb_fill_page_desc(skb, i, page, off, size);
+}
+
 /**
  * skb_fill_page_desc - initialise a paged fragment in an skb
  * @skb: buffer containing fragment to be initialised
@@ -2498,6 +2518,16 @@ static inline void skb_fill_page_desc(struct sk_buff *skb, int i,
 {
 	__skb_fill_page_desc(skb, i, page, off, size);
 	skb_shinfo(skb)->nr_frags = i + 1;
+}
+
+static inline void skb_fill_data_desc(struct sk_buff *skb, int i, void *data,
+				      int size)
+{
+	struct page *page = virt_to_head_page(data);
+	int off;
+
+	off = (unsigned char *)data - (unsigned char *)page_address(page);
+	skb_fill_page_desc(skb, i, page, off, size);
 }
 
 /**
@@ -2523,6 +2553,16 @@ static inline void skb_fill_page_desc_noacc(struct sk_buff *skb, int i,
 
 void skb_add_rx_frag(struct sk_buff *skb, int i, struct page *page, int off,
 		     int size, unsigned int truesize);
+
+static inline void skb_add_rx_frag_data(struct sk_buff *skb, int i, void *data,
+					int size, unsigned int truesize)
+{
+	struct page *page = virt_to_head_page(data);
+	int off;
+
+	off = (unsigned char *)data - (unsigned char *)page_address(page);
+	skb_add_rx_frag(skb, i, page, off, size, truesize);
+}
 
 void skb_coalesce_rx_frag(struct sk_buff *skb, int i, int size,
 			  unsigned int truesize);

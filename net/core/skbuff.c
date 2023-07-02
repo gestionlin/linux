@@ -3534,8 +3534,6 @@ skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len, int hlen)
 	int i, j = 0;
 	int plen = 0; /* length of skb->head fragment */
 	int ret;
-	struct page *page;
-	unsigned int offset;
 
 	BUG_ON(!from->head_frag && !hlen);
 
@@ -3551,10 +3549,8 @@ skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len, int hlen)
 	} else {
 		plen = min_t(int, skb_headlen(from), len);
 		if (plen) {
-			page = virt_to_head_page(from->head);
-			offset = from->data - (unsigned char *)page_address(page);
-			__skb_fill_page_desc(to, 0, page, offset, plen);
-			get_page(page);
+			__skb_fill_data_desc(to, 0, from->head, plen);
+			page_ref_inc(virt_to_head_page(from->head));
 			j = 1;
 			len -= plen;
 		}
@@ -4238,11 +4234,8 @@ EXPORT_SYMBOL_GPL(skb_pull_rcsum);
 static inline skb_frag_t skb_head_frag_to_page_desc(struct sk_buff *frag_skb)
 {
 	skb_frag_t head_frag;
-	struct page *page;
 
-	page = virt_to_head_page(frag_skb->head);
-	skb_frag_fill_page_desc(&head_frag, page, frag_skb->data -
-				(unsigned char *)page_address(page),
+	skb_frag_fill_data_desc(&head_frag, frag_skb->data,
 				skb_headlen(frag_skb));
 	return head_frag;
 }
@@ -5685,9 +5678,6 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 		return false;
 
 	if (skb_headlen(from) != 0) {
-		struct page *page;
-		unsigned int offset;
-
 		if (to_shinfo->nr_frags +
 		    from_shinfo->nr_frags >= MAX_SKB_FRAGS)
 			return false;
@@ -5696,12 +5686,8 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 			return false;
 
 		delta = from->truesize - SKB_DATA_ALIGN(sizeof(struct sk_buff));
-
-		page = virt_to_head_page(from->head);
-		offset = from->data - (unsigned char *)page_address(page);
-
-		skb_fill_page_desc(to, to_shinfo->nr_frags,
-				   page, offset, skb_headlen(from));
+		skb_fill_data_desc(to, to_shinfo->nr_frags,
+				   from->head, skb_headlen(from));
 		*fragstolen = true;
 	} else {
 		if (to_shinfo->nr_frags +

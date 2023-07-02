@@ -205,8 +205,6 @@ static struct sk_buff *dpaa2_eth_build_frag_skb(struct dpaa2_eth_priv *priv,
 	dma_addr_t sg_addr;
 	u16 sg_offset;
 	u32 sg_length;
-	struct page *page, *head_page;
-	int page_offset;
 	int i;
 
 	for (i = 0; i < DPAA2_ETH_MAX_SG_ENTRIES; i++) {
@@ -246,21 +244,13 @@ static struct sk_buff *dpaa2_eth_build_frag_skb(struct dpaa2_eth_priv *priv,
 			skb_reserve(skb, sg_offset);
 			skb_put(skb, sg_length);
 		} else {
-			/* Rest of the data buffers are stored as skb frags */
-			page = virt_to_page(sg_vaddr);
-			head_page = virt_to_head_page(sg_vaddr);
-
-			/* Offset in page (which may be compound).
+			/* Rest of the data buffers are stored as skb frags.
 			 * Data in subsequent SG entries is stored from the
 			 * beginning of the buffer, so we don't need to add the
 			 * sg_offset.
 			 */
-			page_offset = ((unsigned long)sg_vaddr &
-				(PAGE_SIZE - 1)) +
-				(page_address(page) - page_address(head_page));
-
-			skb_add_rx_frag(skb, i - 1, head_page, page_offset,
-					sg_length, priv->rx_buf_size);
+			skb_add_rx_frag_data(skb, i - 1, sg_vaddr, sg_length,
+					     priv->rx_buf_size);
 		}
 
 		if (dpaa2_sg_is_final(sge))

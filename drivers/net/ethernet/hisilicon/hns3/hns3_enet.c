@@ -3726,8 +3726,7 @@ static int hns3_handle_rx_copybreak(struct sk_buff *skb, int i,
 
 	desc_cb->reuse_flag = 1;
 	memcpy(frag, desc_cb->buf + frag_offset, frag_size);
-	skb_add_rx_frag(skb, i, virt_to_page(frag),
-			offset_in_page(frag), frag_size, frag_size);
+	skb_add_rx_frag_data(skb, i, frag, frag_size, frag_size);
 
 	hns3_ring_stats_update(ring, frag_alloc);
 	return 0;
