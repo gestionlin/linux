@@ -813,11 +813,10 @@ static int gem_rx(struct gem *gp, int work_to_do)
 				       RX_BUF_ALLOC_SIZE(gp), DMA_FROM_DEVICE);
 			gp->rx_skbs[entry] = new_skb;
 			skb_put(new_skb, (gp->rx_buf_sz + RX_OFFSET));
-			rxd->buffer = cpu_to_le64(dma_map_page(&gp->pdev->dev,
-							       virt_to_page(new_skb->data),
-							       offset_in_page(new_skb->data),
-							       RX_BUF_ALLOC_SIZE(gp),
-							       DMA_FROM_DEVICE));
+			rxd->buffer = cpu_to_le64(dma_map_single(&gp->pdev->dev,
+								 new_skb->data,
+								 RX_BUF_ALLOC_SIZE(gp),
+								 DMA_FROM_DEVICE));
 			skb_reserve(new_skb, RX_OFFSET);
 
 			/* Trim the original skb for the netif. */
@@ -1021,10 +1020,8 @@ static netdev_tx_t gem_start_xmit(struct sk_buff *skb,
 		u32 len;
 
 		len = skb->len;
-		mapping = dma_map_page(&gp->pdev->dev,
-				       virt_to_page(skb->data),
-				       offset_in_page(skb->data),
-				       len, DMA_TO_DEVICE);
+		mapping = dma_map_single(&gp->pdev->dev, skb->data, len,
+					 DMA_TO_DEVICE);
 		ctrl |= TXDCTRL_SOF | TXDCTRL_EOF | len;
 		if (gem_intme(entry))
 			ctrl |= TXDCTRL_INTME;
@@ -1047,10 +1044,8 @@ static netdev_tx_t gem_start_xmit(struct sk_buff *skb,
 		 * Otherwise we could race with the device.
 		 */
 		first_len = skb_headlen(skb);
-		first_mapping = dma_map_page(&gp->pdev->dev,
-					     virt_to_page(skb->data),
-					     offset_in_page(skb->data),
-					     first_len, DMA_TO_DEVICE);
+		first_mapping = dma_map_single(&gp->pdev->dev, skb->data,
+					       first_len, DMA_TO_DEVICE);
 		entry = NEXT_TX(entry);
 
 		for (frag = 0; frag < skb_shinfo(skb)->nr_frags; frag++) {
@@ -1639,11 +1634,9 @@ static void gem_init_rings(struct gem *gp)
 
 		gp->rx_skbs[i] = skb;
 		skb_put(skb, (gp->rx_buf_sz + RX_OFFSET));
-		dma_addr = dma_map_page(&gp->pdev->dev,
-					virt_to_page(skb->data),
-					offset_in_page(skb->data),
-					RX_BUF_ALLOC_SIZE(gp),
-					DMA_FROM_DEVICE);
+		dma_addr = dma_map_single(&gp->pdev->dev, skb->data,
+					  RX_BUF_ALLOC_SIZE(gp),
+					  DMA_FROM_DEVICE);
 		rxd->buffer = cpu_to_le64(dma_addr);
 		dma_wmb();
 		rxd->status_word = cpu_to_le64(RXDCTRL_FRESH(gp));

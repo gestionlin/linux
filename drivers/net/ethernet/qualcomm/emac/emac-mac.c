@@ -1343,11 +1343,9 @@ static void emac_tx_fill_tpd(struct emac_adapter *adpt,
 
 		tpbuf = GET_TPD_BUFFER(tx_q, tx_q->tpd.produce_idx);
 		tpbuf->length = mapped_len;
-		tpbuf->dma_addr = dma_map_page(adpt->netdev->dev.parent,
-					       virt_to_page(skb->data),
-					       offset_in_page(skb->data),
-					       tpbuf->length,
-					       DMA_TO_DEVICE);
+		tpbuf->dma_addr = dma_map_single(adpt->netdev->dev.parent,
+						 skb->data, tpbuf->length,
+						 DMA_TO_DEVICE);
 		ret = dma_mapping_error(adpt->netdev->dev.parent,
 					tpbuf->dma_addr);
 		if (ret)
@@ -1363,12 +1361,9 @@ static void emac_tx_fill_tpd(struct emac_adapter *adpt,
 	if (mapped_len < len) {
 		tpbuf = GET_TPD_BUFFER(tx_q, tx_q->tpd.produce_idx);
 		tpbuf->length = len - mapped_len;
-		tpbuf->dma_addr = dma_map_page(adpt->netdev->dev.parent,
-					       virt_to_page(skb->data +
-							    mapped_len),
-					       offset_in_page(skb->data +
-							      mapped_len),
-					       tpbuf->length, DMA_TO_DEVICE);
+		tpbuf->dma_addr = dma_map_single(adpt->netdev->dev.parent,
+						 skb->data + mapped_len,
+						 tpbuf->length, DMA_TO_DEVICE);
 		ret = dma_mapping_error(adpt->netdev->dev.parent,
 					tpbuf->dma_addr);
 		if (ret)

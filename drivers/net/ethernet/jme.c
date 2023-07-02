@@ -735,9 +735,8 @@ jme_make_new_rx_buf(struct jme_adapter *jme, int i)
 	if (unlikely(!skb))
 		return -ENOMEM;
 
-	mapping = dma_map_page(&jme->pdev->dev, virt_to_page(skb->data),
-			       offset_in_page(skb->data), skb_tailroom(skb),
-			       DMA_FROM_DEVICE);
+	mapping = dma_map_single(&jme->pdev->dev, skb->data, skb_tailroom(skb),
+				 DMA_FROM_DEVICE);
 	if (unlikely(dma_mapping_error(&jme->pdev->dev, mapping))) {
 		dev_kfree_skb(skb);
 		return -ENOMEM;
@@ -1949,25 +1948,13 @@ jme_alloc_txdesc(struct jme_adapter *jme,
 	return idx;
 }
 
-static int
-jme_fill_tx_map(struct pci_dev *pdev,
-		struct txdesc *txdesc,
+static void
+jme_fill_tx_map(struct txdesc *txdesc,
 		struct jme_buffer_info *txbi,
-		struct page *page,
-		u32 page_offset,
+		dma_addr_t dmaaddr,
 		u32 len,
 		bool hidma)
 {
-	dma_addr_t dmaaddr;
-
-	dmaaddr = dma_map_page(&pdev->dev, page, page_offset, len,
-			       DMA_TO_DEVICE);
-
-	if (unlikely(dma_mapping_error(&pdev->dev, dmaaddr)))
-		return -EINVAL;
-
-	dma_sync_single_for_device(&pdev->dev, dmaaddr, len, DMA_TO_DEVICE);
-
 	txdesc->dw[0] = 0;
 	txdesc->dw[1] = 0;
 	txdesc->desc2.flags	= TXFLAG_OWN;
@@ -1979,7 +1966,6 @@ jme_fill_tx_map(struct pci_dev *pdev,
 
 	txbi->mapping = dmaaddr;
 	txbi->len = len;
-	return 0;
 }
 
 static void jme_drop_tx_map(struct jme_adapter *jme, int startidx, int count)
@@ -2008,6 +1994,7 @@ jme_map_tx_skb(struct jme_adapter *jme, struct sk_buff *skb, int idx)
 	bool hidma = jme->dev->features & NETIF_F_HIGHDMA;
 	int i, nr_frags = skb_shinfo(skb)->nr_frags;
 	int mask = jme->tx_ring_mask;
+	dma_addr_t dmaaddr;
 	u32 len;
 	int ret = 0;
 
@@ -2017,23 +2004,31 @@ jme_map_tx_skb(struct jme_adapter *jme, struct sk_buff *skb, int idx)
 		ctxdesc = txdesc + ((idx + i + 2) & (mask));
 		ctxbi = txbi + ((idx + i + 2) & (mask));
 
-		ret = jme_fill_tx_map(jme->pdev, ctxdesc, ctxbi,
-				      skb_frag_page(frag), skb_frag_off(frag),
-				      skb_frag_size(frag), hidma);
-		if (ret) {
+		len = skb_frag_size(frag);
+		dmaaddr = skb_frag_dma_map(&jme->pdev->dev, frag, 0, len,
+					   DMA_TO_DEVICE);
+		if (dma_mapping_error(&jme->pdev->dev, dmaaddr)) {
+			ret = -EINVAL;
 			jme_drop_tx_map(jme, idx, i);
 			goto out;
 		}
+
+		jme_fill_tx_map(ctxdesc, ctxbi, dmaaddr, len, hidma);
 	}
 
 	len = skb_is_nonlinear(skb) ? skb_headlen(skb) : skb->len;
 	ctxdesc = txdesc + ((idx + 1) & (mask));
 	ctxbi = txbi + ((idx + 1) & (mask));
-	ret = jme_fill_tx_map(jme->pdev, ctxdesc, ctxbi, virt_to_page(skb->data),
-			offset_in_page(skb->data), len, hidma);
-	if (ret)
-		jme_drop_tx_map(jme, idx, i);
 
+	dmaaddr = dma_map_single(&jme->pdev->dev, skb->data, len,
+				 DMA_TO_DEVICE);
+	if (dma_mapping_error(&jme->pdev->dev, dmaaddr)) {
+		ret = -EINVAL;
+		jme_drop_tx_map(jme, idx, i);
+		goto out;
+	}
+
+	jme_fill_tx_map(ctxdesc, ctxbi, dmaaddr, len, hidma);
 out:
 	return ret;
 

@@ -2744,8 +2744,7 @@ static inline int cas_xmit_tx_ringN(struct cas *cp, int ring,
 
 	nr_frags = skb_shinfo(skb)->nr_frags;
 	len = skb_headlen(skb);
-	mapping = dma_map_page(&cp->pdev->dev, virt_to_page(skb->data),
-			       offset_in_page(skb->data), len, DMA_TO_DEVICE);
+	mapping = dma_map_single(&cp->pdev->dev, skb->data, len, DMA_TO_DEVICE);
 
 	tentry = entry;
 	tabort = cas_calc_tabort(cp, (unsigned long) skb->data, len);

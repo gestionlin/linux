@@ -1404,9 +1404,8 @@ static void dpaa_fd_release(const struct net_device *net_dev,
 
 		dpaa_release_sgt_members(sgt);
 
-		addr = dma_map_page(dpaa_bp->priv->rx_dma_dev,
-				    virt_to_page(vaddr), 0, DPAA_BP_RAW_SIZE,
-				    DMA_FROM_DEVICE);
+		addr = dma_map_single(dpaa_bp->priv->rx_dma_dev, vaddr,
+				      DPAA_BP_RAW_SIZE, DMA_FROM_DEVICE);
 		if (dma_mapping_error(dpaa_bp->priv->rx_dma_dev, addr)) {
 			netdev_err(net_dev, "DMA mapping failed\n");
 			return;
