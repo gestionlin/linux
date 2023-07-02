@@ -1387,9 +1387,7 @@ static int vhost_net_release(struct inode *inode, struct file *f)
 	kfree(n->vqs[VHOST_NET_VQ_RX].rxq.queue);
 	kfree(n->vqs[VHOST_NET_VQ_TX].xdp);
 	kfree(n->dev.vqs);
-	if (n->page_frag.va)
-		__page_frag_cache_drain(virt_to_head_page(n->page_frag.va),
-					n->page_frag.pagecnt_bias);
+	page_frag_cache_drain(&n->page_frag);
 	kvfree(n);
 	return 0;
 }
