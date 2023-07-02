@@ -88,16 +88,19 @@ static dma_addr_t otx2_dma_map_skb_frag(struct otx2_nic *pfvf,
 
 	/* First segment is always skb->data */
 	if (!seg) {
-		page = virt_to_page(skb->data);
-		offset = offset_in_page(skb->data);
 		*len = skb_headlen(skb);
-	} else {
-		frag = &skb_shinfo(skb)->frags[seg - 1];
-		page = skb_frag_page(frag);
-		offset = skb_frag_off(frag);
-		*len = skb_frag_size(frag);
+		return dma_map_single_attrs(pfvf->dev, skb->data, *len,
+					    DMA_TO_DEVICE,
+					    DMA_ATTR_SKIP_CPU_SYNC);
 	}
-	return otx2_dma_map_page(pfvf, page, offset, *len, DMA_TO_DEVICE);
+
+	frag = &skb_shinfo(skb)->frags[seg - 1];
+	page = skb_frag_page(frag);
+	offset = skb_frag_off(frag);
+	*len = skb_frag_size(frag);
+
+	return dma_map_page_attrs(pfvf->dev, page, offset, *len,
+				  DMA_TO_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
 }
 
 static void otx2_dma_unmap_skb_frags(struct otx2_nic *pfvf, struct sg_list *sg)

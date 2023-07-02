@@ -891,20 +891,6 @@ static inline int rvu_get_pf(u16 pcifunc)
 	return (pcifunc >> RVU_PFVF_PF_SHIFT) & RVU_PFVF_PF_MASK;
 }
 
-static inline dma_addr_t otx2_dma_map_page(struct otx2_nic *pfvf,
-					   struct page *page,
-					   size_t offset, size_t size,
-					   enum dma_data_direction dir)
-{
-	dma_addr_t iova;
-
-	iova = dma_map_page_attrs(pfvf->dev, page,
-				  offset, size, dir, DMA_ATTR_SKIP_CPU_SYNC);
-	if (unlikely(dma_mapping_error(pfvf->dev, iova)))
-		return (dma_addr_t)NULL;
-	return iova;
-}
-
 static inline void otx2_dma_unmap_page(struct otx2_nic *pfvf,
 				       dma_addr_t addr, size_t size,
 				       enum dma_data_direction dir)

@@ -2514,9 +2514,8 @@ static int otx2_xdp_xmit_tx(struct otx2_nic *pf, struct xdp_frame *xdpf,
 	u64 dma_addr;
 	int err = 0;
 
-	dma_addr = otx2_dma_map_page(pf, virt_to_page(xdpf->data),
-				     offset_in_page(xdpf->data), xdpf->len,
-				     DMA_TO_DEVICE);
+	dma_addr = dma_map_single_attrs(pf->dev, xdpf->data, xdpf->len,
+					DMA_TO_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
 	if (dma_mapping_error(pf->dev, dma_addr))
 		return -ENOMEM;
 
