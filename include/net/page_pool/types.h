@@ -124,6 +124,7 @@ struct mem_provider;
 
 enum pp_memory_provider_type {
 	__PP_MP_NONE, /* Use system allocator directly */
+	PP_MP_DMABUF_DEVMEM, /* dmabuf devmem provider */
 };
 
 struct pp_memory_provider_ops {
@@ -132,6 +133,21 @@ struct pp_memory_provider_ops {
 	struct page *(*alloc_pages)(struct page_pool *pool, gfp_t gfp);
 	void (*release_page)(struct page_pool *pool, struct page *page);
 	void (*free_pages)(struct page_pool *pool, struct page *page);
+};
+
+extern const struct pp_memory_provider_ops dmabuf_devmem_ops;
+
+struct page_pool_iov {
+	unsigned long res0;
+	unsigned long pp_magic;
+	struct page_pool *pp;
+	/* private: no need to document this padding */
+	unsigned long res1;	/* aliases with folio->mapping */
+	/* public: */
+	unsigned long dma_addr;
+	atomic_long_t pp_frag_count;
+	struct page *page;
+	refcount_t _refcount;
 };
 
 struct page_pool {

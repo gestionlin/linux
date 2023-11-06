@@ -20,6 +20,7 @@
 #include <linux/poison.h>
 #include <linux/ethtool.h>
 #include <linux/netdevice.h>
+#include <linux/genalloc.h>
 
 #include <trace/events/page_pool.h>
 
@@ -230,6 +231,9 @@ static int page_pool_init(struct page_pool *pool,
 
 	switch (pool->p.memory_provider) {
 	case __PP_MP_NONE:
+		break;
+	case PP_MP_DMABUF_DEVMEM:
+		pool->mp_ops = &dmabuf_devmem_ops;
 		break;
 	default:
 		err = -EINVAL;
@@ -1010,3 +1014,66 @@ void page_pool_update_nid(struct page_pool *pool, int new_nid)
 	}
 }
 EXPORT_SYMBOL(page_pool_update_nid);
+
+/*** "Dmabuf devmem memory provider" ***/
+
+static int mp_dmabuf_devmem_init(struct page_pool *pool)
+{
+	if (pool->p.flags & PP_FLAG_DMA_MAP ||
+	    pool->p.flags & PP_FLAG_DMA_SYNC_DEV)
+		return -EOPNOTSUPP;
+	return 0;
+}
+
+static struct page *mp_dmabuf_devmem_alloc_pages(struct page_pool *pool,
+						 gfp_t gfp)
+{
+	struct page_pool_iov *ppiov;
+	struct page *page;
+
+	ppiov = kvmalloc(sizeof(*ppiov), gfp | __GFP_ZERO);
+	if (!ppiov)
+		return NULL;
+
+	page = alloc_pages_node(pool->p.nid, gfp, pool->p.order);
+	if (!page) {
+		kvfree(ppiov);
+		return NULL;
+	}
+
+	ppiov->pp = pool;
+	ppiov->pp_magic = PP_SIGNATURE;
+	ppiov->page = page;
+	refcount_set(&ppiov->_refcount, 1);
+	pool->pages_state_hold_cnt++;
+	trace_page_pool_state_hold(pool, (struct page *)ppiov,
+				   pool->pages_state_hold_cnt);
+	return (struct page *)ppiov;
+}
+
+static void mp_dmabuf_devmem_destroy(struct page_pool *pool)
+{
+}
+
+static void mp_dmabuf_devmem_release_page(struct page_pool *pool,
+					  struct page *page)
+{
+	struct page_pool_iov *ppiov = (struct page_pool_iov *)page;
+
+	put_page(ppiov->page);
+}
+
+static void mp_dmabuf_devmem_free_pages(struct page_pool *pool,
+					struct page *page)
+{
+	kvfree(page);
+}
+
+const struct pp_memory_provider_ops dmabuf_devmem_ops = {
+	.init			= mp_dmabuf_devmem_init,
+	.destroy		= mp_dmabuf_devmem_destroy,
+	.alloc_pages		= mp_dmabuf_devmem_alloc_pages,
+	.release_page		= mp_dmabuf_devmem_release_page,
+	.free_pages		= mp_dmabuf_devmem_free_pages,
+};
+EXPORT_SYMBOL(dmabuf_devmem_ops);
