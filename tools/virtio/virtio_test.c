@@ -17,9 +17,33 @@
 #include <linux/vhost.h>
 #include <linux/virtio.h>
 #include <linux/virtio_ring.h>
-#include "../../drivers/vhost/test.h"
+#include <linux/if.h>
+#include <linux/if_tun.h>
 
 #define RANDOM_BATCH -1
+
+int tun_alloc() {
+  struct ifreq ifr;
+  int fd, e;
+
+  if ((fd = open("/dev/net/tun", O_RDWR)) < 0) {
+    perror("Cannot open /dev/net/tun");
+    return fd;
+  }
+
+  memset(&ifr, 0, sizeof(ifr));
+
+  ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+  strncpy(ifr.ifr_name, "tun0", IFNAMSIZ);
+
+  if ((e = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0) {
+    perror("ioctl[TUNSETIFF]");
+    close(fd);
+    return e;
+  }
+
+  return fd;
+}
 
 /* Unused */
 void *__kmalloc_fake, *__kfree_ignore_start, *__kfree_ignore_end;
@@ -46,8 +70,8 @@ struct vdev_info {
 	struct vhost_memory *mem;
 };
 
-static const struct vhost_vring_file no_backend = { .fd = -1 },
-				     backend = { .fd = 1 };
+static struct vhost_vring_file no_backend = { .index = 1, .fd = -1 },
+				     backend = { .index = 1, .fd = 1 };
 static const struct vhost_vring_state null_state = {};
 
 bool vq_notify(struct virtqueue *vq)
@@ -112,15 +136,15 @@ static void vq_info_add(struct vdev_info *dev, int num)
 {
 	struct vq_info *info = &dev->vqs[dev->nvqs];
 	int r;
-	info->idx = dev->nvqs;
+	info->idx = 1;
 	info->kick = eventfd(0, EFD_NONBLOCK);
 	info->call = eventfd(0, EFD_NONBLOCK);
 	r = posix_memalign(&info->ring, 4096, vring_size(num, 4096));
 	assert(r >= 0);
 	vq_reset(info, num, &dev->vdev);
 	vhost_vq_setup(dev, info);
-	dev->fds[info->idx].fd = info->call;
-	dev->fds[info->idx].events = POLLIN;
+	dev->fds[0].fd = info->call;
+	dev->fds[0].events = POLLIN;
 	dev->nvqs++;
 }
 
@@ -134,7 +158,7 @@ static void vdev_info_init(struct vdev_info* dev, unsigned long long features)
 	dev->buf_size = 1024;
 	dev->buf = malloc(dev->buf_size);
 	assert(dev->buf);
-	dev->control = open("/dev/vhost-test", O_RDWR);
+	dev->control = open("/dev/vhost-net", O_RDWR);
 	assert(dev->control >= 0);
 	r = ioctl(dev->control, VHOST_SET_OWNER, NULL);
 	assert(r >= 0);
@@ -172,13 +196,14 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 	struct scatterlist sl;
 	long started = 0, completed = 0, next_reset = reset_n;
 	long completed_before, started_before;
-	int r, test = 1;
+	int r;
 	unsigned int len;
 	long long spurious = 0;
 	const bool random_batch = batch == RANDOM_BATCH;
 
-	r = ioctl(dev->control, VHOST_TEST_RUN, &test);
-	assert(r >= 0);
+	r = ioctl(dev->control, VHOST_NET_SET_BACKEND, &backend);
+	assert(!r);
+
 	if (!reset_n) {
 		next_reset = INT_MAX;
 	}
@@ -219,7 +244,7 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 				r = -1;
 
 			if (reset) {
-				r = ioctl(dev->control, VHOST_TEST_SET_BACKEND,
+				r = ioctl(dev->control, VHOST_NET_SET_BACKEND,
 					  &no_backend);
 				assert(!r);
 			}
@@ -244,7 +269,7 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 					  &null_state);
 				assert(!r);
 
-				r = ioctl(dev->control, VHOST_TEST_SET_BACKEND,
+				r = ioctl(dev->control, VHOST_NET_SET_BACKEND,
 					  &backend);
 				assert(!r);
 
@@ -267,9 +292,6 @@ static void run_test(struct vdev_info *dev, struct vq_info *vq,
 				wait_for_interrupt(dev);
 		}
 	}
-	test = 0;
-	r = ioctl(dev->control, VHOST_TEST_RUN, &test);
-	assert(r >= 0);
 	fprintf(stderr,
 		"spurious wakeups: 0x%llx started=0x%lx completed=0x%lx\n",
 		spurious, started, completed);
@@ -314,6 +336,11 @@ const struct option longopts[] = {
 		.val = 'd',
 	},
 	{
+		.name = "buf-num",
+		.val = 'n',
+		.has_arg = required_argument,
+	},
+	{
 		.name = "batch",
 		.val = 'b',
 		.has_arg = required_argument,
@@ -346,7 +373,7 @@ int main(int argc, char **argv)
 	struct vdev_info dev;
 	unsigned long long features = (1ULL << VIRTIO_RING_F_INDIRECT_DESC) |
 		(1ULL << VIRTIO_RING_F_EVENT_IDX) | (1ULL << VIRTIO_F_VERSION_1);
-	long batch = 1, reset = 0;
+	long batch = 1, reset = 0, nbufs = 0x100000;
 	int o;
 	bool delayed = false;
 
@@ -389,6 +416,10 @@ int main(int argc, char **argv)
 				assert(reset < (long)INT_MAX + 1);
 			}
 			break;
+		case 'n':
+			nbufs = strtol(optarg, NULL, 10);
+			assert(nbufs > 0);
+			break;
 		default:
 			assert(0);
 			break;
@@ -396,8 +427,9 @@ int main(int argc, char **argv)
 	}
 
 done:
+	backend.fd = tun_alloc();
 	vdev_info_init(&dev, features);
 	vq_info_add(&dev, 256);
-	run_test(&dev, &dev.vqs[0], delayed, batch, reset, 0x100000);
+	run_test(&dev, &dev.vqs[0], delayed, batch, reset, nbufs);
 	return 0;
 }
