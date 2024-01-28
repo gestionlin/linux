@@ -124,20 +124,20 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
  * Generic helper to lookup and a per-cpu variable with an embedded spinlock.
  * Return value should be used with equivalent unlock helper.
  */
-#define pcpu_spin_lock(type, member, ptr)				\
+#define pcpu_spin_lock(cpu, type, member, ptr)				\
 ({									\
 	type *_ret;							\
 	pcpu_task_pin();						\
-	_ret = this_cpu_ptr(ptr);					\
+	_ret = per_cpu_ptr(ptr, cpu);					\
 	spin_lock(&_ret->member);					\
 	_ret;								\
 })
 
-#define pcpu_spin_trylock(type, member, ptr)				\
+#define pcpu_spin_trylock(cpu, type, member, ptr)				\
 ({									\
 	type *_ret;							\
 	pcpu_task_pin();						\
-	_ret = this_cpu_ptr(ptr);					\
+	_ret = per_cpu_ptr(ptr, cpu);					\
 	if (!spin_trylock(&_ret->member)) {				\
 		pcpu_task_unpin();					\
 		_ret = NULL;						\
@@ -152,11 +152,11 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 })
 
 /* struct per_cpu_pages specific helpers. */
-#define pcp_spin_lock(ptr)						\
-	pcpu_spin_lock(struct per_cpu_pages, lock, ptr)
+#define pcp_spin_lock(cpu, ptr)						\
+	pcpu_spin_lock(cpu, struct per_cpu_pages, lock, ptr)
 
-#define pcp_spin_trylock(ptr)						\
-	pcpu_spin_trylock(struct per_cpu_pages, lock, ptr)
+#define pcp_spin_trylock(cpu, ptr)						\
+	pcpu_spin_trylock(cpu, struct per_cpu_pages, lock, ptr)
 
 #define pcp_spin_unlock(ptr)						\
 	pcpu_spin_unlock(lock, ptr)
@@ -2505,7 +2505,7 @@ void free_unref_page(struct page *page, unsigned int order)
 
 	zone = page_zone(page);
 	pcp_trylock_prepare(UP_flags);
-	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+	pcp = pcp_spin_trylock(smp_processor_id(), zone->per_cpu_pageset);
 	if (pcp) {
 		free_unref_page_commit(zone, pcp, page, pcpmigratetype, order);
 		pcp_spin_unlock(pcp);
@@ -2571,7 +2571,7 @@ void free_unref_page_list(struct list_head *list)
 			 * from IRQ or SoftIRQ context after an IO completion.
 			 */
 			pcp_trylock_prepare(UP_flags);
-			pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+			pcp = pcp_spin_trylock(smp_processor_id(), zone->per_cpu_pageset);
 			if (unlikely(!pcp)) {
 				pcp_trylock_finish(UP_flags);
 				free_one_page(zone, page, page_to_pfn(page),
@@ -2847,7 +2847,7 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 
 	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
 	pcp_trylock_prepare(UP_flags);
-	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+	pcp = pcp_spin_trylock(smp_processor_id(), zone->per_cpu_pageset);
 	if (!pcp) {
 		pcp_trylock_finish(UP_flags);
 		return NULL;
@@ -4466,7 +4466,7 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 
 	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
 	pcp_trylock_prepare(UP_flags);
-	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+	pcp = pcp_spin_trylock(smp_processor_id(), zone->per_cpu_pageset);
 	if (!pcp)
 		goto failed_irq;
 
