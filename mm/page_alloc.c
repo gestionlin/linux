@@ -2425,9 +2425,9 @@ static int nr_pcp_high(struct per_cpu_pages *pcp, struct zone *zone,
 	return high;
 }
 
-static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
+static bool free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 				   struct page *page, int migratetype,
-				   unsigned int order)
+				   unsigned int order, bool try)
 {
 	int high, batch;
 	int pindex;
@@ -2439,10 +2439,6 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 	 * allocations.
 	 */
 	pcp->alloc_factor >>= 1;
-	__count_vm_events(PGFREE, 1 << order);
-	pindex = order_to_pindex(migratetype, order);
-	list_add(&page->pcp_list, &pcp->lists[pindex]);
-	pcp->count += 1 << order;
 
 	batch = READ_ONCE(pcp->batch);
 	/*
@@ -2463,6 +2459,15 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 	if (pcp->free_count < (batch << CONFIG_PCP_BATCH_SCALE_MAX))
 		pcp->free_count += (1 << order);
 	high = nr_pcp_high(pcp, zone, batch, free_high);
+
+	if (try && pcp->count + (1 << order) >= high)
+		return false;
+
+	__count_vm_events(PGFREE, 1 << order);
+	pindex = order_to_pindex(migratetype, order);
+        list_add(&page->pcp_list, &pcp->lists[pindex]);
+	pcp->count += 1 << order;
+
 	if (pcp->count >= high) {
 		free_pcppages_bulk(zone, nr_pcp_free(pcp, batch, high, free_high),
 				   pcp, pindex);
@@ -2471,6 +2476,48 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 				      ZONE_MOVABLE, 0))
 			clear_bit(ZONE_BELOW_HIGH, &zone->flags);
 	}
+
+	return true;
+}
+
+static bool __maybe_unused addqueue_pcplist(struct zone *zone, struct page *page,
+			     int pcpmigratetype, unsigned int order)
+{
+	const struct cpumask *mask = cpumask_of_node(zone_to_nid(zone));
+	unsigned long __maybe_unused UP_flags;
+	struct per_cpu_pages *pcp;
+	int start_cpu, cur_cpu;
+
+	pcp_trylock_prepare(UP_flags);
+	start_cpu = smp_processor_id();
+
+	for_each_cpu_wrap(cur_cpu, mask, start_cpu) {
+		pcp = pcp_spin_trylock(cur_cpu, zone->per_cpu_pageset);
+		if (!pcp)
+			continue;
+
+		if (free_unref_page_commit(zone, pcp, page, pcpmigratetype, order, true)) {
+			pcp_spin_unlock(pcp);
+			pcp_trylock_finish(UP_flags);
+			return true;
+		}
+		pcp_spin_unlock(pcp);
+	}
+
+	cur_cpu = start_cpu;
+	if (!cpumask_test_cpu(start_cpu, mask) && cpumask_any(mask) < nr_cpu_ids)
+		cur_cpu = cpumask_any(mask);
+
+	pcp = pcp_spin_trylock(cur_cpu, zone->per_cpu_pageset);
+	if (!pcp) {
+		pcp_trylock_finish(UP_flags);
+		return false;
+	}
+
+	free_unref_page_commit(zone, pcp, page, pcpmigratetype, order, false);
+	pcp_spin_unlock(pcp);
+	pcp_trylock_finish(UP_flags);
+	return true;
 }
 
 /*
@@ -2478,8 +2525,6 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
  */
 void free_unref_page(struct page *page, unsigned int order)
 {
-	unsigned long __maybe_unused UP_flags;
-	struct per_cpu_pages *pcp;
 	struct zone *zone;
 	unsigned long pfn = page_to_pfn(page);
 	int migratetype, pcpmigratetype;
@@ -2504,15 +2549,10 @@ void free_unref_page(struct page *page, unsigned int order)
 	}
 
 	zone = page_zone(page);
-	pcp_trylock_prepare(UP_flags);
-	pcp = pcp_spin_trylock(smp_processor_id(), zone->per_cpu_pageset);
-	if (pcp) {
-		free_unref_page_commit(zone, pcp, page, pcpmigratetype, order);
-		pcp_spin_unlock(pcp);
-	} else {
-		free_one_page(zone, page, pfn, order, migratetype, FPI_NONE);
-	}
-	pcp_trylock_finish(UP_flags);
+	if (addqueue_pcplist(zone, page, pcpmigratetype, order))
+		return;
+
+	free_one_page(zone, page, pfn, order, migratetype, FPI_NONE);
 }
 
 /*
@@ -2590,7 +2630,7 @@ void free_unref_page_list(struct list_head *list)
 			migratetype = MIGRATE_MOVABLE;
 
 		trace_mm_page_free_batched(page);
-		free_unref_page_commit(zone, pcp, page, migratetype, 0);
+		free_unref_page_commit(zone, pcp, page, migratetype, 0, false);
 		batch_count++;
 	}
 
