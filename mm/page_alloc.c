@@ -2814,18 +2814,8 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 	struct page *page;
 
 	do {
-		if (list_empty(list)) {
-			int batch = nr_pcp_alloc(pcp, zone, order);
-			int alloced;
-
-			alloced = rmqueue_bulk(zone, order,
-					batch, list,
-					migratetype, alloc_flags);
-
-			pcp->count += alloced << order;
-			if (unlikely(list_empty(list)))
-				return NULL;
-		}
+		if (list_empty(list))
+			return NULL;
 
 		page = list_first_entry(list, struct page, pcp_list);
 		list_del(&page->pcp_list);
@@ -2833,6 +2823,25 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 	} while (check_new_pages(page, order));
 
 	return page;
+}
+
+static inline
+struct page *pcplist_refill(struct zone *zone, unsigned int order,
+			    int migratetype, unsigned int alloc_flags,
+			    struct per_cpu_pages *pcp,
+			    struct list_head *list)
+{
+	if (list_empty(list)) {
+		int batch = nr_pcp_alloc(pcp, zone, order);
+		int alloced;
+
+		alloced = rmqueue_bulk(zone, order, batch, list, migratetype,
+				       alloc_flags);
+
+		pcp->count += alloced << order;
+	}
+
+	return __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
 }
 
 /* Lock and remove page from the per-cpu list */
@@ -2844,23 +2853,48 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	struct list_head *list;
 	struct page *page;
 	unsigned long __maybe_unused UP_flags;
+	const struct cpumask *mask = cpumask_of_node(zone_to_nid(zone));
+	int start_cpu, cur_cpu;
 
 	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
 	pcp_trylock_prepare(UP_flags);
-	pcp = pcp_spin_trylock(smp_processor_id(), zone->per_cpu_pageset);
+	start_cpu = smp_processor_id();
+
+	for_each_cpu_wrap(cur_cpu, mask, start_cpu) {
+		pcp = pcp_spin_trylock(cur_cpu, zone->per_cpu_pageset);
+		if (!pcp)
+			continue;
+
+		/*
+		 * On allocation, reduce the number of pages that are batch freed.
+		 * See nr_pcp_free() where free_factor is increased for subsequent
+		 * frees.
+		 */
+		pcp->free_count >>= 1;
+		list = &pcp->lists[order_to_pindex(migratetype, order)];
+		page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
+		pcp_spin_unlock(pcp);
+		if (page) {
+			__count_zid_vm_events(PGALLOC, page_zonenum(page), 1 << order);
+			zone_statistics(preferred_zone, zone, 1);
+			pcp_trylock_finish(UP_flags);
+			return page;
+		}
+	}
+
+	cur_cpu = start_cpu;
+
+	if (!cpumask_test_cpu(start_cpu, mask) && cpumask_any(mask) < nr_cpu_ids)
+		cur_cpu = cpumask_any(mask);
+
+	pcp = pcp_spin_trylock(cur_cpu, zone->per_cpu_pageset);
 	if (!pcp) {
 		pcp_trylock_finish(UP_flags);
 		return NULL;
 	}
 
-	/*
-	 * On allocation, reduce the number of pages that are batch freed.
-	 * See nr_pcp_free() where free_factor is increased for subsequent
-	 * frees.
-	 */
-	pcp->free_count >>= 1;
 	list = &pcp->lists[order_to_pindex(migratetype, order)];
-	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
+	page = pcplist_refill(zone, order, migratetype, alloc_flags, pcp, list);
 	pcp_spin_unlock(pcp);
 	pcp_trylock_finish(UP_flags);
 	if (page) {
