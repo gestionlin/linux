@@ -696,7 +696,10 @@ struct per_cpu_pages {
 	short free_count;	/* consecutive free count */
 
 	/* Lists of pages, one per migrate type stored on the pcp-lists */
-	struct list_head lists[NR_PCP_LISTS];
+	union {
+		struct list_head lists[NR_PCP_LISTS];
+		struct list_head nonthp_lists[MIGRATE_PCPTYPES][PAGE_ALLOC_COSTLY_ORDER + 1];
+	};
 } ____cacheline_aligned_in_smp;
 
 struct per_cpu_zonestat {

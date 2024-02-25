@@ -518,23 +518,24 @@ out:
 	add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
 }
 
-static inline unsigned int order_to_pindex(int migratetype, int order)
+static inline struct list_head *order_to_pcplist(struct per_cpu_pages *pcp,
+						 int migratetype, int order)
 {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	if (order > PAGE_ALLOC_COSTLY_ORDER) {
 		VM_BUG_ON(order != pageblock_order);
-		return NR_LOWORDER_PCP_LISTS;
+		return &pcp->lists[NR_LOWORDER_PCP_LISTS];
 	}
 #else
 	VM_BUG_ON(order > PAGE_ALLOC_COSTLY_ORDER);
 #endif
 
-	return (MIGRATE_PCPTYPES * order) + migratetype;
+	return &pcp->nonthp_lists[migratetype][order];
 }
 
 static inline int pindex_to_order(unsigned int pindex)
 {
-	int order = pindex / MIGRATE_PCPTYPES;
+	int order = pindex % (PAGE_ALLOC_COSTLY_ORDER + 1);
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	if (pindex == NR_LOWORDER_PCP_LISTS)
@@ -2429,7 +2430,6 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 				   unsigned int order)
 {
 	int high, batch;
-	int pindex;
 	bool free_high = false;
 
 	/*
@@ -2439,8 +2439,7 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 	 */
 	pcp->alloc_factor >>= 1;
 	__count_vm_events(PGFREE, 1 << order);
-	pindex = order_to_pindex(migratetype, order);
-	list_add(&page->pcp_list, &pcp->lists[pindex]);
+	list_add(&page->pcp_list, order_to_pcplist(pcp, migratetype, order));
 	pcp->count += 1 << order;
 
 	batch = READ_ONCE(pcp->batch);
@@ -2464,7 +2463,7 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 	high = nr_pcp_high(pcp, zone, batch, free_high);
 	if (pcp->count >= high) {
 		free_pcppages_bulk(zone, nr_pcp_free(pcp, batch, high, free_high),
-				   pcp, pindex);
+				   pcp, 0);
 		if (test_bit(ZONE_BELOW_HIGH, &zone->flags) &&
 		    zone_watermark_ok(zone, 0, high_wmark_pages(zone),
 				      ZONE_MOVABLE, 0))
@@ -2858,7 +2857,7 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	 * frees.
 	 */
 	pcp->free_count >>= 1;
-	list = &pcp->lists[order_to_pindex(migratetype, order)];
+	list = order_to_pcplist(pcp, migratetype, order);
 	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
 	pcp_spin_unlock(pcp);
 	pcp_trylock_finish(UP_flags);
@@ -4470,7 +4469,7 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 		goto failed_irq;
 
 	/* Attempt the batch allocation */
-	pcp_list = &pcp->lists[order_to_pindex(ac.migratetype, 0)];
+	pcp_list = order_to_pcplist(pcp, ac.migratetype, 0);
 	while (nr_populated < nr_pages) {
 
 		/* Skip existing pages */
