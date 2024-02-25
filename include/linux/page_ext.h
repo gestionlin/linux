@@ -94,6 +94,14 @@ static inline struct page_ext *page_ext_next(struct page_ext *curr)
 	return next;
 }
 
+static inline struct page_ext *page_ext_nth(struct page_ext *curr,
+					    unsigned int nr)
+{
+	void *next = curr;
+	next += page_ext_size * nr;
+	return next;
+}
+
 #else /* !CONFIG_PAGE_EXTENSION */
 struct page_ext;
 

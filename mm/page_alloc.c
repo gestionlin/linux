@@ -2833,6 +2833,82 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 	return page;
 }
 
+static void split_page_order(struct page *page, unsigned int order,
+		      unsigned int new_order, int migratetype)
+{
+	int i;
+
+	VM_BUG_ON_PAGE(PageCompound(page), page);
+	VM_BUG_ON_PAGE(!page_count(page), page);
+
+	for (i = 1 << new_order; i < (1 << order); i += 1 << new_order) {
+		set_page_refcounted(page + i);
+		set_pcppage_migratetype(page + i, migratetype);
+	}
+
+	split_page_owner_order(page, 1 << order, new_order);
+	split_page_memcg_order(page, 1 << order, new_order);
+}
+
+static inline struct page *__rmqueue_pcplist_split(struct zone *zone,
+						   unsigned int order,
+						   int migratetype,
+						   struct per_cpu_pages *pcp)
+{
+	struct page *page = NULL, *split_page;
+	struct list_head *list;
+	int i, j;
+
+	if (order >= PAGE_ALLOC_COSTLY_ORDER || pcp->count <= 1 << order)
+		return NULL;
+
+	list = pcp->nonthp_lists[migratetype];
+
+	for (i = order; i <= PAGE_ALLOC_COSTLY_ORDER; i++) {
+
+		do {
+			if (list_empty(&list[i])) {
+				page = NULL;
+				break;
+			}
+
+			page = list_first_entry(&list[i], struct page,
+						pcp_list);
+			list_del(&page->pcp_list);
+			pcp->count -= 1 << i;
+
+		} while (check_new_pages(page, i));
+
+		if (page)
+			break;
+	}
+
+	if (!page || i == order)
+		return page;
+
+	split_page_order(page, i, order, migratetype);
+	split_page = page;
+
+	for (j = 1 << order; j < 1 << i; j += (1 << order)) {
+
+		split_page += 1 << order;
+
+		if (j + (1 << order) <= 1 << i) {
+			list_add(&split_page->pcp_list, &list[order]);
+			pcp->count += 1 << order;
+		} else {
+			unsigned int new_order = (1 << i) - j;
+
+			BUG_ON(!is_power_of_2(new_order));
+			new_order = ilog2(new_order);
+			list_add(&split_page->pcp_list, &list[new_order]);
+			pcp->count += 1 << new_order;
+		}
+	}
+
+	return page;
+}
+
 /* Lock and remove page from the per-cpu list */
 static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 			struct zone *zone, unsigned int order,
@@ -2857,8 +2933,14 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	 * frees.
 	 */
 	pcp->free_count >>= 1;
+	page = __rmqueue_pcplist_split(zone, order, migratetype, pcp);
+	if (page)
+		goto out;
+
 	list = order_to_pcplist(pcp, migratetype, order);
 	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
+
+out:
 	pcp_spin_unlock(pcp);
 	pcp_trylock_finish(UP_flags);
 	if (page) {
@@ -4478,6 +4560,10 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 			continue;
 		}
 
+		page = __rmqueue_pcplist_split(zone, 0, ac.migratetype, pcp);
+		if (page)
+			goto page_prep;
+
 		page = __rmqueue_pcplist(zone, 0, ac.migratetype, alloc_flags,
 								pcp, pcp_list);
 		if (unlikely(!page)) {
@@ -4488,6 +4574,8 @@ unsigned long __alloc_pages_bulk(gfp_t gfp, int preferred_nid,
 			}
 			break;
 		}
+
+page_prep:
 		nr_account++;
 
 		prep_new_page(page, 0, gfp, 0);
