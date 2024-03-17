@@ -313,8 +313,87 @@ extern void free_pages(unsigned long addr, unsigned int order);
 struct page_frag_cache;
 void page_frag_cache_drain(struct page_frag_cache *nc);
 extern void __page_frag_cache_drain(struct page *page, unsigned int count);
-void *__page_frag_alloc_align(struct page_frag_cache *nc, unsigned int fragsz,
-			      gfp_t gfp_mask, unsigned int align_mask);
+void *__page_frag_alloc_prepare_align(struct page_frag_cache *nc,
+				      unsigned int fragsz, gfp_t gfp_mask,
+				      unsigned int align_mask,
+				      unsigned int *offset);
+
+static inline void *__page_frag_alloc_align(struct page_frag_cache *nc,
+					    unsigned int fragsz,
+					    gfp_t gfp_mask,
+					    unsigned int align_mask)
+{
+	unsigned int offset;
+	void *va;
+
+	va = __page_frag_alloc_prepare_align(nc, fragsz, gfp_mask, align_mask,
+					     &offset);
+	if (unlikely(!va))
+		return NULL;
+
+	nc->pagecnt_bias--;
+	nc->offset = offset + fragsz;
+
+	return va + offset;
+}
+
+static inline void *page_frag_alloc_prepare(struct page_frag_cache *nc,
+					    unsigned int *size,
+					    unsigned int *offset,
+					    gfp_t gfp_mask)
+{
+	void *va;
+
+	va = __page_frag_alloc_prepare_align(nc, *size, gfp_mask, ~0u, offset);
+	if (unlikely(!va))
+		return NULL;
+
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+	*size = nc->size_mask - *offset + 1;
+#else
+	*size = PAGE_SIZE - *offset;
+#endif
+
+	return va;
+}
+
+static inline void *page_frag_alloc_prepare_align(struct page_frag_cache *nc,
+						  unsigned int *size,
+						  unsigned int *offset,
+						  unsigned int align,
+						  gfp_t gfp_mask)
+{
+	void *va;
+
+	WARN_ON_ONCE(!is_power_of_2(align));
+	va = __page_frag_alloc_prepare_align(nc, *size, gfp_mask, -align,
+					     offset);
+	if (unlikely(!va))
+		return NULL;
+
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+	*size = nc->size_mask - *offset + 1;
+#else
+	*size = PAGE_SIZE - *offset;
+#endif
+
+	return va;
+}
+
+static inline void page_frag_alloc_commit(struct page_frag_cache *nc,
+					  unsigned int offset,
+					  unsigned int size)
+{
+	nc->pagecnt_bias--;
+	nc->offset = offset + size;
+}
+
+static inline void page_frag_alloc_commit_noref(struct page_frag_cache *nc,
+						unsigned int offset,
+						unsigned int size)
+{
+	nc->offset = offset + size;
+}
 
 static inline void *page_frag_alloc_align(struct page_frag_cache *nc,
 					  unsigned int fragsz, gfp_t gfp_mask,
