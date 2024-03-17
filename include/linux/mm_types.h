@@ -526,7 +526,14 @@ static inline void *folio_get_private(struct folio *folio)
 }
 
 struct page_frag_cache {
-	void * va;
+	union {
+		void *va;
+		/* we maintain a pagecount bias, so that we dont dirty cache
+		 * line containing page->_refcount every time we allocate a
+		 * fragment.
+		 */
+		unsigned long pagecnt_bias;
+	};
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 	__u16 offset;
 	__u16 pfmemalloc:1;
@@ -535,10 +542,6 @@ struct page_frag_cache {
 	__u16 pfmemalloc:1;
 	__u32 offset:31;
 #endif
-	/* we maintain a pagecount bias, so that we dont dirty cache line
-	 * containing page->_refcount every time we allocate a fragment.
-	 */
-	unsigned int		pagecnt_bias;
 };
 
 typedef unsigned long vm_flags_t;
