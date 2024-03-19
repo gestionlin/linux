@@ -3022,19 +3022,22 @@ static struct page *linear_to_page(struct page *page, unsigned int *len,
 				   unsigned int *offset,
 				   struct sock *sk)
 {
-	struct page_frag *pfrag = sk_page_frag(sk);
+	struct page_frag_cache *pfrag = sk_page_frag(sk);
+	unsigned int new_len, new_offset;
+	void *va;
 
-	if (!sk_page_frag_refill(sk, pfrag))
+	va = sk_page_frag_alloc_prepare(sk, pfrag, &new_len, &new_offset);
+	if (!va)
 		return NULL;
 
-	*len = min_t(unsigned int, *len, pfrag->size - pfrag->offset);
+	*len = min_t(unsigned int, *len, new_len);
 
-	memcpy(page_address(pfrag->page) + pfrag->offset,
+	memcpy(va + new_offset,
 	       page_address(page) + *offset, *len);
-	*offset = pfrag->offset;
-	pfrag->offset += *len;
+	*offset = new_offset;
+	page_frag_alloc_commit_noref(pfrag, new_offset, *len);
 
-	return pfrag->page;
+	return virt_to_page(va);
 }
 
 static bool spd_can_coalesce(const struct splice_pipe_desc *spd,
