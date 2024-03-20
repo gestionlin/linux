@@ -97,7 +97,8 @@ refill:
 #endif
 
 	va = (void *)((unsigned long)nc->va & ~size_mask);
-	*offset = ALIGN(nc->offset, -align_mask);
+	*offset = nc->offset;
+	*offset = ALIGN(*offset, -align_mask);
 
 	if (unlikely(*offset + fragsz > (size_mask + 1))) {
 		page = virt_to_page(va);
