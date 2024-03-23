@@ -133,6 +133,25 @@ refill:
 }
 EXPORT_SYMBOL(__page_frag_alloc_prepare_align);
 
+struct page *page_frag_alloc_page_align(struct page_frag_cache *nc,
+					unsigned int fragsz,
+					unsigned int *offset,
+					gfp_t gfp_mask, unsigned int align)
+{
+	void *va;
+
+	WARN_ON_ONCE(!is_power_of_2(align));
+	va = __page_frag_alloc_prepare_align(nc, fragsz, gfp_mask, -align,
+					     offset);
+	if (unlikely(!va))
+		return NULL;
+
+	nc->pagecnt_bias--;
+	nc->offset = *offset + fragsz;
+	return virt_to_page(va);
+}
+EXPORT_SYMBOL(page_frag_alloc_page_align);
+
 /*
  * Frees a page fragment allocated out of either a compound or order 0 page.
  */

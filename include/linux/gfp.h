@@ -409,6 +409,11 @@ static inline void *page_frag_alloc(struct page_frag_cache *nc,
 	return __page_frag_alloc_align(nc, fragsz, gfp_mask, ~0u);
 }
 
+struct page *page_frag_alloc_page_align(struct page_frag_cache *nc,
+					unsigned int fragsz,
+					unsigned int *offset,
+					gfp_t gfp_mask, unsigned int align);
+
 extern void page_frag_free(void *addr);
 
 #define __free_page(page) __free_pages((page), 0)
