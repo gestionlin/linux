@@ -274,7 +274,7 @@ struct xfrm_state {
 	/* Last used time */
 	time64_t		lastused;
 
-	struct page_frag xfrag;
+	struct page_frag_cache xfrag;
 
 	/* Reference to data common to all the instances of this
 	 * transformer. */

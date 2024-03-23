@@ -504,38 +504,27 @@ int esp6_output_head(struct xfrm_state *x, struct sk_buff *skb, struct esp_info 
 			goto skip_cow;
 		} else if ((skb_shinfo(skb)->nr_frags < MAX_SKB_FRAGS)
 			   && !skb_has_frag_list(skb)) {
-			int allocsize;
+			struct page_frag_cache *pfrag = &x->xfrag;
 			struct sock *sk = skb->sk;
-			struct page_frag *pfrag = &x->xfrag;
+			unsigned int frag_offset;
 
 			esp->inplace = false;
 
-			allocsize = ALIGN(tailen, L1_CACHE_BYTES);
-
 			spin_lock_bh(&x->lock);
-
-			if (unlikely(!skb_page_frag_refill(allocsize, pfrag, GFP_ATOMIC))) {
-				spin_unlock_bh(&x->lock);
+			page = page_frag_alloc_page_align(pfrag, tailen,
+							  &frag_offset,
+							  GFP_ATOMIC,
+							  L1_CACHE_BYTES);
+			spin_unlock_bh(&x->lock);
+			if (unlikely(!page))
 				goto cow;
-			}
 
-			page = pfrag->page;
-			get_page(page);
-
-			tail = page_address(page) + pfrag->offset;
-
+			tail = page_address(page) + frag_offset;
 			esp_output_fill_trailer(tail, esp->tfclen, esp->plen, esp->proto);
-
 			nfrags = skb_shinfo(skb)->nr_frags;
-
-			__skb_fill_page_desc(skb, nfrags, page, pfrag->offset,
+			__skb_fill_page_desc(skb, nfrags, page, frag_offset,
 					     tailen);
 			skb_shinfo(skb)->nr_frags = ++nfrags;
-
-			pfrag->offset = pfrag->offset + allocsize;
-
-			spin_unlock_bh(&x->lock);
-
 			nfrags++;
 
 			skb->len += tailen;
@@ -619,26 +608,21 @@ int esp6_output_tail(struct xfrm_state *x, struct sk_buff *skb, struct esp_info 
 		goto error_free;
 
 	if (!esp->inplace) {
-		int allocsize;
-		struct page_frag *pfrag = &x->xfrag;
-
-		allocsize = ALIGN(skb->data_len, L1_CACHE_BYTES);
+		struct page_frag_cache *pfrag = &x->xfrag;
+		unsigned int frag_offset;
 
 		spin_lock_bh(&x->lock);
-		if (unlikely(!skb_page_frag_refill(allocsize, pfrag, GFP_ATOMIC))) {
-			spin_unlock_bh(&x->lock);
+		page = page_frag_alloc_page_align(pfrag, skb->data_len,
+						  &frag_offset, GFP_ATOMIC,
+						  L1_CACHE_BYTES);
+		spin_unlock_bh(&x->lock);
+		if (unlikely(!page))
 			goto error_free;
-		}
 
 		skb_shinfo(skb)->nr_frags = 1;
 
-		page = pfrag->page;
-		get_page(page);
 		/* replace page frags in skb with new page */
 		__skb_fill_page_desc(skb, 0, page, pfrag->offset, skb->data_len);
-		pfrag->offset = pfrag->offset + allocsize;
-		spin_unlock_bh(&x->lock);
-
 		sg_init_table(dsg, skb_shinfo(skb)->nr_frags + 1);
 		err = skb_to_sgvec(skb, dsg,
 			           (unsigned char *)esph - skb->data,
