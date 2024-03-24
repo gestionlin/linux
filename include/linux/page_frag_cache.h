@@ -43,8 +43,25 @@ static inline bool page_frag_cache_is_pfmemalloc(struct page_frag_cache *nc)
 
 void page_frag_cache_drain(struct page_frag_cache *nc);
 void __page_frag_cache_drain(struct page *page, unsigned int count);
-void *page_frag_alloc_va(struct page_frag_cache *nc, unsigned int fragsz,
-			 gfp_t gfp_mask);
+void *page_frag_cache_refill(struct page_frag_cache *nc, unsigned int fragsz,
+			     gfp_t gfp_mask);
+
+static inline void *page_frag_alloc_va(struct page_frag_cache *nc,
+				       unsigned int fragsz, gfp_t gfp_mask)
+{
+	unsigned int offset;
+	void *va;
+
+	va = page_frag_cache_refill(nc, fragsz, gfp_mask);
+	if (unlikely(!va))
+		return NULL;
+
+	offset = nc->offset;
+	nc->pagecnt_bias--;
+	nc->offset = offset + fragsz;
+
+	return va + offset;
+}
 
 static inline void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 					       unsigned int fragsz,
@@ -67,6 +84,126 @@ static inline void *page_frag_alloc_va_align(struct page_frag_cache *nc,
 		     fragsz < sizeof(unsigned int));
 
 	return __page_frag_alloc_va_align(nc, fragsz, gfp_mask, align);
+}
+
+static inline void *page_frag_alloc_va_prepare(struct page_frag_cache *nc,
+					       unsigned int *offset,
+					       unsigned int *size,
+					       gfp_t gfp_mask)
+{
+	void *va;
+
+	va = page_frag_cache_refill(nc, *size, gfp_mask);
+	if (unlikely(!va))
+		return NULL;
+
+	*offset = nc->offset;
+
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+	*size = nc->size_mask - *offset + 1;
+#else
+	*size = PAGE_SIZE - *offset;
+#endif
+
+	return va + *offset;
+}
+
+static inline void *page_frag_alloc_va_prepare_align(struct page_frag_cache *nc,
+						     unsigned int *offset,
+						     unsigned int *size,
+						     unsigned int align,
+						     gfp_t gfp_mask)
+{
+	WARN_ON_ONCE(!is_power_of_2(align) || align >= PAGE_SIZE ||
+		     *size < sizeof(unsigned int));
+
+	*offset = nc->offset;
+	nc->offset = ALIGN(*offset, align);
+	return page_frag_alloc_va_prepare(nc, offset, size, gfp_mask);
+}
+
+static inline void *__page_frag_alloc_pg_prepare(struct page_frag_cache *nc,
+						 unsigned int *offset,
+						 unsigned int *size,
+						 gfp_t gfp_mask)
+{
+	void *va;
+
+	va = page_frag_cache_refill(nc, *size, gfp_mask);
+	if (unlikely(!va))
+		return NULL;
+
+	*offset = nc->offset;
+
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+	*size = nc->size_mask - *offset + 1;
+#else
+	*size = PAGE_SIZE - *offset;
+#endif
+
+	return va;
+}
+
+#define page_frag_alloc_pg_prepare(nc, offset, size, gfp)		\
+({									\
+	struct page *__page = NULL;					\
+	void *__va;							\
+									\
+	__va = __page_frag_alloc_pg_prepare(nc, offset, size, gfp);	\
+	if (likely(__va))						\
+		__page = virt_to_page(__va);				\
+									\
+	__page;								\
+})
+
+static inline void *__page_frag_alloc_prepare(struct page_frag_cache *nc,
+					      unsigned int *offset,
+					      unsigned int *size,
+					      void **va, gfp_t gfp_mask)
+{
+	void *nc_va;
+
+	nc_va = page_frag_cache_refill(nc, *size, gfp_mask);
+	if (unlikely(!nc_va))
+		return NULL;
+
+	*offset = nc->offset;
+	*va = nc_va + *offset;
+
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+	*size = nc->size_mask - *offset + 1;
+#else
+	*size = PAGE_SIZE - *offset;
+#endif
+
+	return nc_va;
+}
+
+#define page_frag_alloc_prepare(nc, offset, size, va, gfp)		\
+({									\
+	struct page *__page = NULL;					\
+	void *__va;							\
+									\
+	__va = __page_frag_alloc_prepare(nc, offset, size, va, gfp);	\
+	if (likely(__va))						\
+		__page = virt_to_page(__va);				\
+									\
+	__page;								\
+})
+
+static inline void page_frag_alloc_commit(struct page_frag_cache *nc,
+					  unsigned int offset,
+					  unsigned int size)
+{
+	nc->pagecnt_bias--;
+	nc->offset = offset + size;
+}
+
+static inline void page_frag_alloc_commit_noref(struct page_frag_cache *nc,
+						unsigned int offset,
+						unsigned int size)
+{
+	nc->offset = offset + size;
 }
 
 void page_frag_free_va(void *addr);
