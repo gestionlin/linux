@@ -60,6 +60,10 @@ static bool __page_frag_cache_refill(struct page_frag_cache *nc,
 	return true;
 }
 
+/**
+ * page_frag_cache_drain - Drain the current page from page_frag cache.
+ * @nc: page_frag cache from which to drain
+ */
 void page_frag_cache_drain(struct page_frag_cache *nc)
 {
 	if (!nc->va)
