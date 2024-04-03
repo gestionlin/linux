@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Page fragment allocator
+
+/**
+ * DOC: page_frag allocator
  *
- * Page Fragment:
- *  An arbitrary-length arbitrary-offset area of memory which resides within a
- *  0 or higher order page.  Multiple fragments within that page are
- *  individually refcounted, in the page's reference counter.
+ * A page fragment is an arbitrary-length arbitrary-offset area of memory which
+ * resides within a 0 or higher order compound page.  Multiple fragments within
+ * that page are individually refcounted, in the page's reference counter.
  *
- * The page_frag functions provide a simple allocation framework for page
- * fragments.  This is used by the network stack and network device drivers to
- * provide a backing region of memory for use as either an sk_buff->head, or to
- * be used in the "frags" portion of skb_shared_info.
+ * The page_frag functions, page_frag_alloc* and page_frag_free*, provide a
+ * simple allocation framework for page fragments.  This is used by the network
+ * stack and network device drivers to provide a backing region of memory for
+ * use as either an sk_buff->head, or to be used in the "frags" portion of
+ * skb_shared_info.
+ *
+ * In order to make use of the page fragment APIs a backing page fragment cache
+ * is needed.  This provides a central point for the fragment allocation and
+ * tracks allows multiple calls to make use of a cached page.  The advantage to
+ * doing this is that multiple calls to get_page can be avoided which can be
+ * expensive at allocation time.  However due to the nature of this caching it
+ * is required that any calls to the cache be protected by either a per-cpu
+ * limitation, or a per-cpu limitation and forcing interrupts to be disabled
+ * when executing the fragment allocation.
  */
 
 #include <linux/export.h>
@@ -57,6 +68,10 @@ static bool __page_frag_cache_refill(struct page_frag_cache *nc,
 	return true;
 }
 
+/**
+ * page_frag_cache_drain - Drain the current page from page_frag cache.
+ * @nc: page_frag cache from which to drain
+ */
 void page_frag_cache_drain(struct page_frag_cache *nc)
 {
 	if (!nc->va)

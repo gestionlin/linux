@@ -1,43 +1,80 @@
+.. SPDX-License-Identifier: GPL-2.0
+
 ==============
 Page fragments
 ==============
 
-A page fragment is an arbitrary-length arbitrary-offset area of memory
-which resides within a 0 or higher order compound page.  Multiple
-fragments within that page are individually refcounted, in the page's
-reference counter.
+.. kernel-doc:: mm/page_frag_cache.c
+   :doc: page_frag allocator
 
-The page_frag functions, page_frag_alloc and page_frag_free, provide a
-simple allocation framework for page fragments.  This is used by the
-network stack and network device drivers to provide a backing region of
-memory for use as either an sk_buff->head, or to be used in the "frags"
-portion of skb_shared_info.
+Architecture overview
+=====================
 
-In order to make use of the page fragment APIs a backing page fragment
-cache is needed.  This provides a central point for the fragment allocation
-and tracks allows multiple calls to make use of a cached page.  The
-advantage to doing this is that multiple calls to get_page can be avoided
-which can be expensive at allocation time.  However due to the nature of
-this caching it is required that any calls to the cache be protected by
-either a per-cpu limitation, or a per-cpu limitation and forcing interrupts
-to be disabled when executing the fragment allocation.
+.. code-block:: none
 
-The network stack uses two separate caches per CPU to handle fragment
-allocation.  The netdev_alloc_cache is used by callers making use of the
-netdev_alloc_frag and __netdev_alloc_skb calls.  The napi_alloc_cache is
-used by callers of the __napi_alloc_frag and __napi_alloc_skb calls.  The
-main difference between these two calls is the context in which they may be
-called.  The "netdev" prefixed functions are usable in any context as these
-functions will disable interrupts, while the "napi" prefixed functions are
-only usable within the softirq context.
+    +----------------------+
+    | page_frag API caller |
+    +----------------------+
+            ^
+            |
+            |
+            |
+            v
+    +----------------------------------------------+
+    |          request page fragment               |
+    +----------------------------------------------+
+        ^                                        ^
+        |                                        |
+        | Cache empty or not enough              |
+        |                                        |
+        v                                        |
+    +--------------------------------+           |
+    | refill cache with order 3 page |           |
+    +--------------------------------+           |
+     ^                  ^                        |
+     |                  |                        |
+     |                  | Refill failed          |
+     |                  |                        | Cache is enough
+     |                  |                        |
+     |                  v                        |
+     |    +----------------------------------+   |
+     |    |  refill cache with order 0 page  |   |
+     |    +----------------------------------+   |
+     |                       ^                   |
+     | Refill succeed        |                   |
+     |                       | Refill succeed    |
+     |                       |                   |
+     v                       v                   v
+    +----------------------------------------------+
+    |       allocate fragment from cache           |
+    +----------------------------------------------+
 
-Many network device drivers use a similar methodology for allocating page
-fragments, but the page fragments are cached at the ring or descriptor
-level.  In order to enable these cases it is necessary to provide a generic
-way of tearing down a page cache.  For this reason __page_frag_cache_drain
-was implemented.  It allows for freeing multiple references from a single
-page via a single call.  The advantage to doing this is that it allows for
-cleaning up the multiple references that were added to a page in order to
-avoid calling get_page per allocation.
+API interface
+=============
+As the design and implementation of page_frag API, the allocation side does not
+allow concurrent calling, it is assumed that the caller must ensure there is not
+concurrent alloc calling to the same page_frag_cache instance by using it's own
+lock or rely on some lockless guarantee like NAPI softirq.
 
-Alexander Duyck, Nov 29, 2016.
+Depending on different use cases, callers expecting to deal with va, page or
+both va and page for them may call page_frag_alloc_va(), page_frag_alloc_pg(),
+or page_frag_alloc() accordingly.
+
+There is also a use case that need minimum memory in order for forward
+progressing, but can do better if there is more memory available. Introduce
+page_frag_alloc_prepare() and page_frag_alloc_commit() related API, the caller
+requests the minimum memory it need and the prepare API will return the maximum
+size of the fragment returned, caller need to report back to the page_frag core
+how much memory it actually use by calling commit API, or not calling the commit
+API if deciding to not use any memory.
+
+.. kernel-doc:: include/linux/page_frag_cache.h
+   :identifiers: page_frag_cache_init page_frag_cache_is_pfmemalloc
+                 page_frag_alloc_va __page_frag_alloc_va_align
+                 page_frag_alloc_va_align page_frag_alloc_va_prepare
+                 page_frag_alloc_va_prepare_align page_frag_alloc_pg_prepare
+                 page_frag_alloc_prepare page_frag_alloc_commit
+                 page_frag_alloc_commit_noref page_frag_free_va
+
+.. kernel-doc:: mm/page_frag_cache.c
+   :identifiers: page_frag_cache_drain
