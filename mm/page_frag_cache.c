@@ -21,8 +21,8 @@
 static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 					     gfp_t gfp_mask)
 {
-	struct page *page = NULL;
 	gfp_t gfp = gfp_mask;
+	struct page *page;
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 	/* Ensure free_unref_page() can be used to free the page fragment */
@@ -32,10 +32,17 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 		   __GFP_NOWARN | __GFP_NORETRY | __GFP_NOMEMALLOC;
 	page = alloc_pages_node(NUMA_NO_NODE, gfp_mask,
 				PAGE_FRAG_CACHE_MAX_ORDER);
-	nc->size = page ? PAGE_FRAG_CACHE_MAX_SIZE : PAGE_SIZE;
-#endif
-	if (unlikely(!page))
+	if (unlikely(!page)) {
 		page = alloc_pages_node(NUMA_NO_NODE, gfp, 0);
+		nc->size_mask = PAGE_SIZE - 1;
+	} else {
+		nc->size_mask = PAGE_FRAG_CACHE_MAX_SIZE - 1;
+		VM_BUG_ON(BITS_PER_LONG <= 32 &&
+			  nc->size_mask != PAGE_FRAG_CACHE_MAX_SIZE - 1);
+	}
+#else
+	page = alloc_pages_node(NUMA_NO_NODE, gfp, 0);
+#endif
 
 	nc->va = page ? page_address(page) : NULL;
 
@@ -65,8 +72,9 @@ void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 				 unsigned int fragsz, gfp_t gfp_mask,
 				 unsigned int align_mask)
 {
-	unsigned int size, offset;
+	unsigned long size_mask, offset;
 	struct page *page;
+	void *va;
 
 	if (unlikely(!nc->va)) {
 refill:
@@ -82,18 +90,20 @@ refill:
 		/* reset page count bias and offset to start of new frag */
 		nc->pfmemalloc = page_is_pfmemalloc(page);
 		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		nc->offset = 0;
 	}
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
-	/* if size can vary use size else just use PAGE_SIZE */
-	size = nc->size;
+	/* if size_mask can vary, use size_mask else just use PAGE_SIZE - 1 */
+	size_mask = nc->size_mask;
 #else
-	size = PAGE_SIZE;
+	size_mask = PAGE_SIZE - 1;
 #endif
 
-	offset = __ALIGN_KERNEL_MASK(nc->offset, ~align_mask);
-	if (unlikely(offset + fragsz > size)) {
+	va = nc->va;
+	offset = (unsigned long)va & size_mask;
+	va = (void *)((unsigned long)va & ~size_mask);
+	offset = __ALIGN_KERNEL_MASK(offset, ~align_mask);
+	if (unlikely(offset + fragsz >= size_mask + 1)) {
 		/* fragsz is not supposed to be bigger than PAGE_SIZE as we are
 		 * allowing order 3 page allocation to fail easily under low
 		 * memory condition.
@@ -101,7 +111,7 @@ refill:
 		if (WARN_ON_ONCE(fragsz > PAGE_SIZE))
 			return NULL;
 
-		page = virt_to_page(nc->va);
+		page = virt_to_page(va);
 
 		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
 			goto refill;
@@ -120,9 +130,10 @@ refill:
 	}
 
 	nc->pagecnt_bias--;
-	nc->offset = offset + fragsz;
+	va += offset;
+	nc->va = va + fragsz;
 
-	return nc->va + offset;
+	return va;
 }
 EXPORT_SYMBOL(__page_frag_alloc_va_align);
 
