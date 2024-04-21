@@ -18,8 +18,8 @@
 #include <linux/page_frag_cache.h>
 #include "internal.h"
 
-static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
-					     gfp_t gfp_mask)
+static bool __page_frag_cache_refill(struct page_frag_cache *nc,
+				     gfp_t gfp_mask)
 {
 	struct page *page = NULL;
 	gfp_t gfp = gfp_mask;
@@ -32,14 +32,29 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 		   __GFP_NOWARN | __GFP_NORETRY | __GFP_NOMEMALLOC;
 	page = alloc_pages_node(NUMA_NO_NODE, gfp_mask,
 				PAGE_FRAG_CACHE_MAX_ORDER);
-	nc->size = page ? PAGE_FRAG_CACHE_MAX_SIZE : PAGE_SIZE;
-#endif
-	if (unlikely(!page))
+	if (unlikely(!page)) {
 		page = alloc_pages_node(NUMA_NO_NODE, gfp, 0);
+		nc->size_mask = PAGE_SIZE - 1;
+	} else {
+		nc->size_mask = PAGE_FRAG_CACHE_MAX_SIZE - 1;
+		VM_BUG_ON(BITS_PER_LONG <= 32 &&
+			  nc->size_mask != PAGE_FRAG_CACHE_MAX_SIZE - 1);
+	}
+#else
+	page = alloc_pages_node(NUMA_NO_NODE, gfp, 0);
+#endif
 
-	nc->va = page ? page_address(page) : NULL;
+	if (unlikely(!page)) {
+		nc->va = NULL;
+		return false;
+	}
 
-	return page;
+	nc->va = page_address(page);
+	page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
+	nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+	nc->pfmemalloc = page_is_pfmemalloc(page);
+
+	return true;
 }
 
 void page_frag_cache_drain(struct page_frag_cache *nc)
@@ -61,46 +76,32 @@ void __page_frag_cache_drain(struct page *page, unsigned int count)
 }
 EXPORT_SYMBOL(__page_frag_cache_drain);
 
-void *page_frag_alloc_va(struct page_frag_cache *nc, unsigned int fragsz,
-			 gfp_t gfp_mask)
+void *__page_frag_alloc_va_align(struct page_frag_cache *nc, unsigned int fragsz,
+				 gfp_t gfp_mask, unsigned int align)
 {
-	unsigned int size, offset;
+	unsigned long size_mask, offset;
 	struct page *page;
+	void *va;
 
 	if (unlikely(!nc->va)) {
 refill:
-		page = __page_frag_cache_refill(nc, gfp_mask);
-		if (!page)
+		if (!__page_frag_cache_refill(nc, gfp_mask))
 			return NULL;
-
-		/* Even if we own the page, we do not use atomic_set().
-		 * This would break get_page_unless_zero() users.
-		 */
-		page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
-
-		/* reset page count bias and offset to start of new frag */
-		nc->pfmemalloc = page_is_pfmemalloc(page);
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		nc->offset = 0;
 	}
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 	/* if size can vary use size else just use PAGE_SIZE */
-	size = nc->size;
+	size_mask = nc->size_mask;
 #else
-	size = PAGE_SIZE;
+	size_mask = PAGE_SIZE - 1;
 #endif
 
-	offset = nc->offset;
-	if (unlikely(offset + fragsz > size)) {
-		/* fragsz is not supposed to be bigger than PAGE_SIZE as we are
-		 * allowing order 3 page allocation to fail easily under low
-		 * memory condition.
-		 */
-		if (WARN_ON_ONCE(fragsz > PAGE_SIZE))
-			return NULL;
-
-		page = virt_to_page(nc->va);
+	va = nc->va;
+	offset = (unsigned long)nc->va & size_mask;
+	offset = ALIGN(offset, align);
+	if (unlikely(offset + fragsz > (size_mask + 1))) {
+		va = (void *)((unsigned long)va & ~size_mask);
+		page = virt_to_page(va);
 
 		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
 			goto refill;
@@ -115,15 +116,14 @@ refill:
 
 		/* reset page count bias and offset to start of new frag */
 		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		offset = 0;
 	}
 
 	nc->pagecnt_bias--;
-	nc->offset = offset + fragsz;
+	nc->va = va + fragsz;
 
-	return nc->va + offset;
+	return va;
 }
-EXPORT_SYMBOL(page_frag_alloc_va);
+EXPORT_SYMBOL(__page_frag_alloc_va_align);
 
 /*
  * Frees a page fragment allocated out of either a compound or order 0 page.
