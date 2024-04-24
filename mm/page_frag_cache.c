@@ -72,7 +72,7 @@ void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 				 unsigned int fragsz, gfp_t gfp_mask,
 				 unsigned int align_mask)
 {
-	unsigned long size_mask, offset;
+	unsigned long size_mask, size;
 	struct page *page;
 	void *va;
 
@@ -89,7 +89,18 @@ refill:
 
 		/* reset page count bias and offset to start of new frag */
 		nc->pfmemalloc = page_is_pfmemalloc(page);
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE;
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+		/* if size_mask can vary, use size_mask else just use PAGE_SIZE - 1 */
+		size_mask = nc->size_mask;
+#else
+		size_mask = PAGE_SIZE - 1;
+#endif
+
+		fragsz = __ALIGN_KERNEL_MASK(fragsz, ~align_mask);
+		va = nc->va;
+		nc->va = (void *)((unsigned long)va | (size_mask + 1 - fragsz));
+		return va;
 	}
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
@@ -100,10 +111,10 @@ refill:
 #endif
 
 	va = nc->va;
-	offset = (unsigned long)va & size_mask;
+	size = (unsigned long)va & size_mask;
 	va = (void *)((unsigned long)va & ~size_mask);
-	offset = __ALIGN_KERNEL_MASK(offset, ~align_mask);
-	if (unlikely(offset + fragsz >= size_mask + 1)) {
+	size &= align_mask;
+	if (unlikely(fragsz > size)) {
 		/* fragsz is not supposed to be bigger than PAGE_SIZE as we are
 		 * allowing order 3 page allocation to fail easily under low
 		 * memory condition.
@@ -125,14 +136,15 @@ refill:
 		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
 
 		/* reset page count bias and offset to start of new frag */
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		offset = 0;
+		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE;
+		fragsz = __ALIGN_KERNEL_MASK(fragsz, ~align_mask);
+		nc->va = (void *)((unsigned long)va | (size_mask + 1 - fragsz));
+		return va;
 	}
 
 	nc->pagecnt_bias--;
-	va += offset;
-	nc->va = va + fragsz;
-
+	nc->va = va + size - fragsz;
+	va += ((size ^ size_mask) + 1);
 	return va;
 }
 EXPORT_SYMBOL(__page_frag_alloc_va_align);

@@ -9,7 +9,7 @@
 #define PAGE_FRAG_CACHE_MAX_ORDER	get_order(PAGE_FRAG_CACHE_MAX_SIZE)
 
 struct page_frag_cache {
-	/* page address and offset */
+	/* page address and size */
 	void *va;
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
