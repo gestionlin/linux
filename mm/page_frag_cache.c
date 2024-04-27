@@ -18,13 +18,38 @@
 #include <linux/page_frag_cache.h>
 #include "internal.h"
 
-static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
-					     gfp_t gfp_mask)
+struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
+				      gfp_t gfp_mask)
 {
+	struct encoded_va *encoded_va;
 	unsigned int size, order;
 	gfp_t gfp = gfp_mask;
 	struct page *page;
 
+	encoded_va = nc->encoded_va;
+
+	if (likely(encoded_va)) {
+
+		page = virt_to_page(encoded_va);
+		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
+			goto alloc_page;
+
+		if (unlikely(encoded_page_pfmemalloc(encoded_va))) {
+			free_unref_page(page, compound_order(page));
+			goto alloc_page;
+		}
+
+		/* OK, page count is 0, we can safely set it */
+		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
+
+		/* reset page count bias and offset to start of new frag */
+		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+		nc->remaining = page_frag_cache_page_size(encoded_va);
+
+		return page;
+	}
+
+alloc_page:
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 	/* Ensure free_unref_page() can be used to free the page fragment */
 	BUILD_BUG_ON(PAGE_FRAG_CACHE_MAX_ORDER > PAGE_ALLOC_COSTLY_ORDER);
@@ -57,6 +82,7 @@ out:
 
 	return page;
 }
+EXPORT_SYMBOL(__page_frag_cache_refill);
 
 void page_frag_cache_drain(struct page_frag_cache *nc)
 {
@@ -77,76 +103,6 @@ void __page_frag_cache_drain(struct page *page, unsigned int count)
 		free_unref_page(page, compound_order(page));
 }
 EXPORT_SYMBOL(__page_frag_cache_drain);
-
-void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
-				 unsigned int fragsz, gfp_t gfp_mask,
-				 unsigned int align_mask)
-{
-	unsigned int remaining, page_size;
-	struct encoded_va *encoded_va;
-#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
-	unsigned long page_order;
-#endif
-	struct page *page;
-
-alloc_fragment:
-	remaining = nc->remaining & align_mask;
-	encoded_va = nc->encoded_va;
-#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
-	page_order = encoded_page_order(encoded_va);
-	page_size = PAGE_SIZE << page_order;
-#else
-	page_size = PAGE_SIZE;
-#endif
-
-	if (unlikely(fragsz > remaining)) {
-		if (unlikely(!encoded_va)) {
-			page = __page_frag_cache_refill(nc, gfp_mask);
-			if (page)
-				goto alloc_fragment;
-
-			return NULL;
-		}
-
-		/* fragsz is not supposed to be bigger than PAGE_SIZE as we are
-		 * allowing order 3 page allocation to fail easily under low
-		 * memory condition.
-		 */
-		if (WARN_ON_ONCE(fragsz > PAGE_SIZE))
-			return NULL;
-
-		page = virt_to_page(encoded_va);
-		if (!page_ref_sub_and_test(page, nc->pagecnt_bias)) {
-			page = __page_frag_cache_refill(nc, gfp_mask);
-			if (page)
-				goto alloc_fragment;
-
-			return NULL;
-		}
-
-		if (unlikely(encoded_page_pfmemalloc(encoded_va))) {
-			free_unref_page(page, compound_order(page));
-			page = __page_frag_cache_refill(nc,  gfp_mask);
-			if (page)
-				goto alloc_fragment;
-
-			return NULL;
-		}
-
-		/* OK, page count is 0, we can safely set it */
-		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
-
-		/* reset page count bias and offset to start of new frag */
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		remaining = page_size;
-	}
-
-	nc->remaining = remaining - fragsz;
-	nc->pagecnt_bias--;
-
-	return encoded_page_address(encoded_va) + (page_size - remaining);
-}
-EXPORT_SYMBOL(__page_frag_alloc_va_align);
 
 /*
  * Frees a page fragment allocated out of either a compound or order 0 page.

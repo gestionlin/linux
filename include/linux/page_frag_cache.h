@@ -73,22 +73,65 @@ static inline bool page_frag_cache_is_pfmemalloc(struct page_frag_cache *nc)
 
 void page_frag_cache_drain(struct page_frag_cache *nc);
 void __page_frag_cache_drain(struct page *page, unsigned int count);
-void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
-				 unsigned int fragsz, gfp_t gfp_mask,
-				 unsigned int align_mask);
 
-static inline void *page_frag_alloc_va_align(struct page_frag_cache *nc,
-					     unsigned int fragsz,
-					     gfp_t gfp_mask, unsigned int align)
+struct page *__page_frag_cache_refill(struct page_frag_cache *nc, gfp_t gfp);
+
+static inline unsigned int page_frag_cache_page_size(struct encoded_va *encoded_va)
 {
-	WARN_ON_ONCE(!is_power_of_2(align) || align > PAGE_SIZE);
-	return __page_frag_alloc_va_align(nc, fragsz, gfp_mask, -align);
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+	return PAGE_SIZE << encoded_page_order(encoded_va);
+#else
+	return PAGE_SIZE;
+#endif
+}
+
+static inline unsigned int __page_frag_cache_page_offset(struct encoded_va *encoded_va,
+							 unsigned int remaining)
+{
+	return page_frag_cache_page_size(encoded_va) - remaining;
 }
 
 static inline void *page_frag_alloc_va(struct page_frag_cache *nc,
-				       unsigned int fragsz, gfp_t gfp_mask)
+				       unsigned int fragsz, gfp_t gfp)
 {
-	return __page_frag_alloc_va_align(nc, fragsz, gfp_mask, ~0u);
+	struct encoded_va *encoded_va;
+	unsigned int remaining;
+
+	remaining = nc->remaining;
+	if (unlikely(fragsz > remaining)) {
+		/* fragsz is not supposed to be bigger than PAGE_SIZE as we are
+		 * allowing order 3 page allocation to fail easily under low
+		 * memory condition.
+		 */
+		if (WARN_ON_ONCE(fragsz > PAGE_SIZE) ||
+		    !__page_frag_cache_refill(nc, gfp))
+			return NULL;
+
+		remaining = nc->remaining;
+	}
+
+	encoded_va = nc->encoded_va;
+	nc->remaining = remaining - fragsz;
+	nc->pagecnt_bias--;
+
+	return encoded_page_address(encoded_va) +
+		__page_frag_cache_page_offset(encoded_va, remaining);
+}
+
+static inline void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
+					       unsigned int fragsz, gfp_t gfp,
+					       unsigned int align_mask)
+{
+	nc->remaining = nc->remaining & align_mask;
+	return page_frag_alloc_va(nc, fragsz, gfp);
+}
+
+static inline void *page_frag_alloc_va_align(struct page_frag_cache *nc,
+					     unsigned int fragsz,
+					     gfp_t gfp, unsigned int align)
+{
+	WARN_ON_ONCE(!is_power_of_2(align) || align > PAGE_SIZE);
+	return __page_frag_alloc_va_align(nc, fragsz, gfp, -align);
 }
 
 void page_frag_free_va(void *addr);
