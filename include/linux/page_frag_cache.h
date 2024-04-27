@@ -4,26 +4,11 @@
 #define _LINUX_PAGE_FRAG_CACHE_H
 
 #include <linux/gfp.h>
-
-#define PAGE_FRAG_CACHE_MAX_SIZE	__ALIGN_MASK(32768, ~PAGE_MASK)
-#define PAGE_FRAG_CACHE_MAX_ORDER	get_order(PAGE_FRAG_CACHE_MAX_SIZE)
+#include <linux/page_frag_types.h>
 
 #define PAGE_FRAG_CACHE_ORDER_MASK		GENMASK(1, 0)
 #define PAGE_FRAG_CACHE_PFMEMALLOC_BIT		BIT(2)
 #define PAGE_FRAG_CACHE_PFMEMALLOC_SHIFT	2
-
-struct page_frag_cache {
-	/* page address & pfmemalloc & order */
-	void *va;
-
-#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
-	u16 pagecnt_bias;
-	u16 size;
-#else
-	u32 pagecnt_bias;
-	u32 size;
-#endif
-};
 
 static inline void page_frag_cache_init(struct page_frag_cache *nc)
 {
@@ -34,11 +19,6 @@ static inline bool page_frag_cache_is_pfmemalloc(struct page_frag_cache *nc)
 {
 	return (unsigned long)nc->va & PAGE_FRAG_CACHE_PFMEMALLOC_BIT;
 }
-
-void page_frag_cache_drain(struct page_frag_cache *nc);
-void __page_frag_cache_drain(struct page *page, unsigned int count);
-
-struct page *__page_frag_cache_refill(struct page_frag_cache *nc, gfp_t gfp);
 
 static inline unsigned int page_frag_cache_page_size(void *va)
 {
@@ -234,7 +214,5 @@ static inline void page_frag_alloc_commit_noref(struct page_frag_cache *nc,
 	VM_BUG_ON(fragsz > nc->size);
 	nc->size -= fragsz;
 }
-
-void page_frag_free_va(void *addr);
 
 #endif
