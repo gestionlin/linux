@@ -23,6 +23,7 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 {
 	struct page *page = NULL;
 	gfp_t gfp = gfp_mask;
+	unsigned int order;
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 	/* Ensure free_unref_page() can be used to free the page fragment */
@@ -32,23 +33,41 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 		   __GFP_NOWARN | __GFP_NORETRY | __GFP_NOMEMALLOC;
 	page = alloc_pages_node(NUMA_NO_NODE, gfp_mask,
 				PAGE_FRAG_CACHE_MAX_ORDER);
-	nc->size = page ? PAGE_FRAG_CACHE_MAX_SIZE : PAGE_SIZE;
 #endif
-	if (unlikely(!page))
+	if (unlikely(!page)) {
 		page = alloc_pages_node(NUMA_NO_NODE, gfp, 0);
+		if (unlikely(!page)) {
+			memset(nc, 0, sizeof(*nc));
+			return NULL;
+		}
 
-	nc->va = page ? page_address(page) : NULL;
+		order = 0;
+		nc->remaining = PAGE_SIZE;
+	} else {
+		order = PAGE_FRAG_CACHE_MAX_ORDER;
+		nc->remaining = PAGE_FRAG_CACHE_MAX_SIZE;
+	}
 
+	/* Even if we own the page, we do not use atomic_set().
+	 * This would break get_page_unless_zero() users.
+	 */
+	page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
+
+	/* reset page count bias of new frag */
+	nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+	nc->encoded_va = encode_aligned_va(page_address(page), order,
+					   page_is_pfmemalloc(page));
 	return page;
 }
 
 void page_frag_cache_drain(struct page_frag_cache *nc)
 {
-	if (!nc->va)
+	if (!nc->encoded_va)
 		return;
 
-	__page_frag_cache_drain(virt_to_head_page(nc->va), nc->pagecnt_bias);
-	nc->va = NULL;
+	__page_frag_cache_drain(virt_to_head_page(nc->encoded_va),
+				nc->pagecnt_bias);
+	memset(nc, 0, sizeof(*nc));
 }
 EXPORT_SYMBOL(page_frag_cache_drain);
 
@@ -65,50 +84,37 @@ void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 				 unsigned int fragsz, gfp_t gfp_mask,
 				 unsigned int align_mask)
 {
-	unsigned int size = PAGE_SIZE;
+	struct encoded_va *encoded_va = nc->encoded_va;
+	unsigned int remaining;
 	struct page *page;
-	int offset;
 
-	if (unlikely(!nc->va)) {
+	if (unlikely(!encoded_va)) {
 refill:
-		page = __page_frag_cache_refill(nc, gfp_mask);
-		if (!page)
+		if (unlikely(!__page_frag_cache_refill(nc, gfp_mask)))
 			return NULL;
 
-		/* Even if we own the page, we do not use atomic_set().
-		 * This would break get_page_unless_zero() users.
-		 */
-		page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
-
-		/* reset page count bias and offset to start of new frag */
-		nc->pfmemalloc = page_is_pfmemalloc(page);
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		nc->offset = 0;
+		encoded_va = nc->encoded_va;
 	}
 
-#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
-	/* if size can vary use size else just use PAGE_SIZE */
-	size = nc->size;
-#endif
-
-	offset = __ALIGN_KERNEL_MASK(nc->offset, ~align_mask);
-	if (unlikely(offset + fragsz > size)) {
-		page = virt_to_page(nc->va);
-
+	remaining = nc->remaining & align_mask;
+	if (unlikely(fragsz > remaining)) {
+		page = virt_to_page(encoded_va);
 		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
 			goto refill;
 
-		if (unlikely(nc->pfmemalloc)) {
-			free_unref_page(page, compound_order(page));
+		if (unlikely(encoded_page_pfmemalloc(encoded_va))) {
+			VM_BUG_ON(compound_order(page) !=
+				  encoded_page_order(encoded_va));
+			free_unref_page(page, encoded_page_order(encoded_va));
 			goto refill;
 		}
 
 		/* OK, page count is 0, we can safely set it */
 		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
 
-		/* reset page count bias and offset to start of new frag */
+		/* reset page count bias and remaining of new frag */
 		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		offset = 0;
+		remaining = page_frag_cache_page_size(encoded_va);
 
 		if (WARN_ON_ONCE(fragsz > PAGE_SIZE)) {
 			/*
@@ -125,9 +131,10 @@ refill:
 	}
 
 	nc->pagecnt_bias--;
-	nc->offset = offset + fragsz;
+	nc->remaining = remaining - fragsz;
 
-	return nc->va + offset;
+	return encoded_page_address(encoded_va) +
+		__page_frag_cache_page_offset(encoded_va, remaining);
 }
 EXPORT_SYMBOL(__page_frag_alloc_va_align);
 
