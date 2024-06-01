@@ -21,10 +21,36 @@
 static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 					     gfp_t gfp_mask)
 {
-	struct page *page = NULL;
+	struct encoded_va *encoded_va = nc->encoded_va;
 	gfp_t gfp = gfp_mask;
 	unsigned int order;
+	struct page *page;
 
+	if (unlikely(!encoded_va))
+		goto alloc;
+
+	page = virt_to_page(encoded_va);
+	if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
+		goto alloc;
+
+	if (unlikely(encoded_page_pfmemalloc(encoded_va))) {
+		VM_BUG_ON(compound_order(page) !=
+			  encoded_page_order(encoded_va));
+		free_unref_page(page, encoded_page_order(encoded_va));
+		goto alloc;
+	}
+
+	/* OK, page count is 0, we can safely set it */
+	set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
+
+	/* reset page count bias and remaining of new frag */
+	nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+	nc->remaining = page_frag_cache_page_size(encoded_va);
+
+	return page;
+
+alloc:
+	page = NULL;
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
 	/* Ensure free_unref_page() can be used to free the page fragment */
 	BUILD_BUG_ON(PAGE_FRAG_CACHE_MAX_ORDER > PAGE_ALLOC_COSTLY_ORDER);
@@ -84,56 +110,28 @@ void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 				 unsigned int fragsz, gfp_t gfp_mask,
 				 unsigned int align_mask)
 {
-	struct encoded_va *encoded_va = nc->encoded_va;
-	unsigned int remaining;
-	struct page *page;
+	unsigned int remaining = nc->remaining & align_mask;
 
-	if (unlikely(!encoded_va)) {
-refill:
-		if (unlikely(!__page_frag_cache_refill(nc, gfp_mask)))
-			return NULL;
-
-		encoded_va = nc->encoded_va;
-	}
-
-	remaining = nc->remaining & align_mask;
 	if (unlikely(fragsz > remaining)) {
-		page = virt_to_page(encoded_va);
-		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
-			goto refill;
-
-		if (unlikely(encoded_page_pfmemalloc(encoded_va))) {
-			VM_BUG_ON(compound_order(page) !=
-				  encoded_page_order(encoded_va));
-			free_unref_page(page, encoded_page_order(encoded_va));
-			goto refill;
-		}
-
-		/* OK, page count is 0, we can safely set it */
-		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
-
-		/* reset page count bias and remaining of new frag */
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		remaining = page_frag_cache_page_size(encoded_va);
-		if (unlikely(fragsz > PAGE_SIZE)) {
-			/*
-			 * The caller is trying to allocate a fragment
-			 * with fragsz > PAGE_SIZE but the cache isn't big
-			 * enough to satisfy the request, this may
-			 * happen in low memory conditions.
-			 * We don't release the cache page because
-			 * it could make memory pressure worse
-			 * so we simply return NULL here.
-			 */
+		/*
+		 * Cache refill failed or the caller is trying to allocate a
+		 * fragment with fragsz > PAGE_SIZE but the cache isn't big
+		 * enough to satisfy the request, this may happen in low memory
+		 * conditions. We don't release the cache page because it could
+		 * make memory pressure worse so we simply return NULL here.
+		 */
+		if (unlikely(!__page_frag_cache_refill(nc, gfp_mask) ||
+			     fragsz > PAGE_SIZE))
 			return NULL;
-		}
+
+		remaining = nc->remaining;
 	}
 
 	nc->pagecnt_bias--;
 	nc->remaining = remaining - fragsz;
 
-	return encoded_page_address(encoded_va) +
-		__page_frag_cache_page_offset(encoded_va, remaining);
+	return encoded_page_address(nc->encoded_va) +
+		__page_frag_cache_page_offset(nc->encoded_va, remaining);
 }
 EXPORT_SYMBOL(__page_frag_alloc_va_align);
 
