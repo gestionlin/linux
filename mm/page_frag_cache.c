@@ -63,7 +63,8 @@ alloc:
 	if (unlikely(!page)) {
 		page = alloc_pages_node(NUMA_NO_NODE, gfp, 0);
 		if (unlikely(!page)) {
-			memset(nc, 0, sizeof(*nc));
+			nc->encoded_va = NULL;
+			nc->remaining = 0;
 			return NULL;
 		}
 
