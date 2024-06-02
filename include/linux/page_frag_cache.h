@@ -62,7 +62,7 @@ static inline void *encoded_page_address(struct encoded_va *encoded_va)
 struct page_frag_cache {
 	struct encoded_va *encoded_va;
 
-#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE)
+#if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
 	u16 pagecnt_bias;
 	u16 remaining;
 #else
