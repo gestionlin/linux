@@ -22,8 +22,8 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 					     gfp_t gfp_mask)
 {
 	struct encoded_va *encoded_va = nc->encoded_va;
+	unsigned int order = PAGE_FRAG_CACHE_MAX_ORDER;
 	gfp_t gfp = gfp_mask;
-	unsigned int order;
 	struct page *page;
 
 	if (unlikely(!encoded_va))
@@ -70,7 +70,6 @@ alloc:
 		order = 0;
 		nc->remaining = PAGE_SIZE;
 	} else {
-		order = PAGE_FRAG_CACHE_MAX_ORDER;
 		nc->remaining = PAGE_FRAG_CACHE_MAX_SIZE;
 	}
 
