@@ -18,14 +18,6 @@
 #include <linux/page_frag_cache.h>
 #include "internal.h"
 
-static void *page_frag_cache_current_va(struct page_frag_cache *nc)
-{
-	struct encoded_va *encoded_va = nc->encoded_va;
-
-	return (void *)(((unsigned long)encoded_va & PAGE_MASK) |
-		(page_frag_cache_page_size(encoded_va) - nc->remaining));
-}
-
 static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 					     gfp_t gfp_mask)
 {

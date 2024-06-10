@@ -202,6 +202,42 @@ struct page *page_frag_alloc_prepare(struct page_frag_cache *nc,
 				     unsigned int *fragsz,
 				     void **va, gfp_t gfp);
 
+static inline unsigned int page_frag_cache_remaining(struct page_frag_cache *nc)
+{
+	return nc->remaining;
+}
+
+static inline void *page_frag_cache_current_va(struct page_frag_cache *nc)
+{
+	struct encoded_va *encoded_va = nc->encoded_va;
+
+	return (void *)(((unsigned long)encoded_va & PAGE_MASK) |
+		(page_frag_cache_page_size(encoded_va) - nc->remaining));
+}
+
+static inline void *page_frag_cache_head_va(struct page_frag_cache *nc)
+{
+	return (void *)((unsigned long)nc->encoded_va & PAGE_MASK);
+}
+
+static inline void *page_frag_alloc_remaining_va(struct page_frag_cache *nc,
+						 unsigned int fragsz)
+{
+	int remaining;
+	void *va;
+
+	VM_BUG_ON(!fragsz);
+	remaining = nc->remaining -fragsz;
+	if (unlikely(remaining < 0))
+		return NULL;
+
+	va = page_frag_cache_current_va(nc);
+	nc->pagecnt_bias--;
+	nc->remaining = remaining;
+
+	return va;
+}
+
 static inline struct encoded_va *__page_frag_alloc_probe(struct page_frag_cache *nc,
 							 unsigned int *offset,
 							 unsigned int *fragsz,

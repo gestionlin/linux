@@ -333,7 +333,7 @@ struct receive_queue {
 	struct ewma_pkt_len mrg_avg_pkt_len;
 
 	/* Page frag for packet buffer allocation. */
-	struct page_frag alloc_frag;
+	struct page_frag_cache alloc_frag;
 
 	/* RX: fragments + linear part + virtio header */
 	struct scatterlist sg[MAX_SKB_FRAGS + 2];
@@ -859,7 +859,7 @@ static void virtnet_rq_init_one_sg(struct receive_queue *rq, void *buf, u32 len)
 	u32 offset;
 	void *head;
 
-	head = page_address(rq->alloc_frag.page);
+	head = page_frag_cache_head_va(&rq->alloc_frag);;
 
 	offset = buf - head;
 
@@ -874,57 +874,58 @@ static void virtnet_rq_init_one_sg(struct receive_queue *rq, void *buf, u32 len)
 
 static void *virtnet_rq_alloc(struct receive_queue *rq, u32 size, gfp_t gfp)
 {
-	struct page_frag *alloc_frag = &rq->alloc_frag;
+	struct page_frag_cache *alloc_frag = &rq->alloc_frag;
 	struct virtnet_rq_dma *dma;
-	void *buf, *head;
+	unsigned int fragsz;
 	dma_addr_t addr;
+	void *buf;
 
-	if (unlikely(!skb_page_frag_refill(size, alloc_frag, gfp)))
-		return NULL;
+	buf = page_frag_alloc_remaining_va(alloc_frag, size);
+	if (buf) {
+		dma = page_frag_cache_head_va(alloc_frag);
+		++dma->ref;
 
-	head = page_address(alloc_frag->page);
-
-	dma = head;
-
-	/* new pages */
-	if (!alloc_frag->offset) {
-		if (rq->last_dma) {
-			/* Now, the new page is allocated, the last dma
-			 * will not be used. So the dma can be unmapped
-			 * if the ref is 0.
-			 */
-			virtnet_rq_unmap(rq, rq->last_dma, 0);
-			rq->last_dma = NULL;
-		}
-
-		dma->len = alloc_frag->size - sizeof(*dma);
-
-		addr = virtqueue_dma_map_single_attrs(rq->vq, dma + 1,
-						      dma->len, DMA_FROM_DEVICE, 0);
-		if (virtqueue_dma_mapping_error(rq->vq, addr))
-			return NULL;
-
-		dma->addr = addr;
-		dma->need_sync = virtqueue_dma_need_sync(rq->vq, addr);
-
-		/* Add a reference to dma to prevent the entire dma from
-		 * being released during error handling. This reference
-		 * will be freed after the pages are no longer used.
-		 */
-		get_page(alloc_frag->page);
-		dma->ref = 1;
-		alloc_frag->offset = sizeof(*dma);
-
-		rq->last_dma = dma;
+		return buf;
 	}
 
+	/* new pages */
+	fragsz = size + sizeof(*dma);
+	buf = page_frag_alloc_va_prepare(alloc_frag, &fragsz, gfp);
+	if (unlikely(!buf))
+		return NULL;
+
+	dma = buf;
+
+	if (rq->last_dma) {
+		/* Now, the new page is allocated, the last dma
+		 * will not be used. So the dma can be unmapped
+		 * if the ref is 0.
+		 */
+		virtnet_rq_unmap(rq, rq->last_dma, 0);
+		rq->last_dma = NULL;
+	}
+
+	dma->len = fragsz - sizeof(*dma);
+
+	addr = virtqueue_dma_map_single_attrs(rq->vq, dma + 1, dma->len,
+					      DMA_FROM_DEVICE, 0);
+	if (virtqueue_dma_mapping_error(rq->vq, addr))
+		return NULL;
+
+	dma->addr = addr;
+	dma->need_sync = virtqueue_dma_need_sync(rq->vq, addr);
+
+	/* Add a reference to dma to prevent the entire dma from
+	 * being released during error handling. This reference
+	 * will be freed after the pages are no longer used.
+	 */
+	page_frag_alloc_commit(alloc_frag, sizeof(*dma));
+	dma->ref = 1;
+	rq->last_dma = dma;
+
 	++dma->ref;
-
-	buf = head + alloc_frag->offset;
-
-	get_page(alloc_frag->page);
-	alloc_frag->offset += size;
-
+	buf += sizeof(*dma);
+	page_frag_alloc_commit(alloc_frag, size);
 	return buf;
 }
 
@@ -2092,7 +2093,7 @@ static unsigned int get_mergeable_buf_len(struct receive_queue *rq,
 static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				 struct receive_queue *rq, gfp_t gfp)
 {
-	struct page_frag *alloc_frag = &rq->alloc_frag;
+	struct page_frag_cache *alloc_frag = &rq->alloc_frag;
 	unsigned int headroom = virtnet_get_headroom(vi);
 	unsigned int tailroom = headroom ? sizeof(struct skb_shared_info) : 0;
 	unsigned int room = SKB_DATA_ALIGN(headroom + tailroom);
@@ -2112,7 +2113,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		return -ENOMEM;
 
 	buf += headroom; /* advance address leaving hole at front of pkt */
-	hole = alloc_frag->size - alloc_frag->offset;
+	hole = page_frag_cache_remaining(alloc_frag);
 	if (hole < len + room) {
 		/* To avoid internal fragmentation, if there is very likely not
 		 * enough space for another buffer, add the remaining space to
@@ -2122,7 +2123,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		 */
 		if (!headroom)
 			len += hole;
-		alloc_frag->offset += hole;
+		page_frag_alloc_commit_noref(alloc_frag, hole);
 	}
 
 	virtnet_rq_init_one_sg(rq, buf, len);
@@ -5210,10 +5211,10 @@ static void free_receive_page_frags(struct virtnet_info *vi)
 {
 	int i;
 	for (i = 0; i < vi->max_queue_pairs; i++)
-		if (vi->rq[i].alloc_frag.page) {
+		if (page_frag_cache_head_va(&vi->rq[i].alloc_frag)) {
 			if (vi->rq[i].last_dma)
 				virtnet_rq_unmap(&vi->rq[i], vi->rq[i].last_dma, 0);
-			put_page(vi->rq[i].alloc_frag.page);
+			page_frag_cache_drain(&vi->rq[i].alloc_frag);
 		}
 }
 
