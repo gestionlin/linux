@@ -83,7 +83,7 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 out:
 	/* reset page count bias and remaining to start of new frag */
 	nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-	nc->remaining = PAGE_SIZE << order;
+	nc->remaining = -(PAGE_SIZE << order);
 
 	return page;
 }
@@ -113,18 +113,17 @@ void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 				 unsigned int align_mask)
 {
 	unsigned int size = page_frag_cache_page_size(nc->encoded_va);
-	int aligned_remaining = nc->remaining & align_mask;
-	int remaining = aligned_remaining - fragsz;
+	int remaining;
 
-	if (unlikely(remaining < 0)) {
+	remaining = __ALIGN_KERNEL_MASK(nc->remaining, ~align_mask);
+	if (unlikely(remaining + (int)fragsz > 0)) {
 		if (!__page_frag_cache_refill(nc, gfp_mask))
 			return NULL;
 
 		size = page_frag_cache_page_size(nc->encoded_va);
 
-		aligned_remaining = size;
-		remaining = aligned_remaining - fragsz;
-		if (unlikely(remaining < 0)) {
+		remaining = -size;
+		if (unlikely(remaining + (int)fragsz > 0)) {
 			/*
 			 * The caller is trying to allocate a fragment
 			 * with fragsz > PAGE_SIZE but the cache isn't big
@@ -139,9 +138,9 @@ void *__page_frag_alloc_va_align(struct page_frag_cache *nc,
 	}
 
 	nc->pagecnt_bias--;
-	nc->remaining = remaining;
+	nc->remaining = remaining + fragsz;
 
-	return encoded_page_address(nc->encoded_va) + (size - aligned_remaining);
+	return encoded_page_address(nc->encoded_va) + size + remaining;
 }
 EXPORT_SYMBOL(__page_frag_alloc_va_align);
 

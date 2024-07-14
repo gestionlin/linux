@@ -56,10 +56,10 @@ struct page_frag_cache {
 	unsigned long encoded_va;
 
 #if (PAGE_SIZE < PAGE_FRAG_CACHE_MAX_SIZE) && (BITS_PER_LONG <= 32)
-	__u16 remaining;
+	__s16 remaining;
 	__u16 pagecnt_bias;
 #else
-	__u32 remaining;
+	__s32 remaining;
 	__u32 pagecnt_bias;
 #endif
 };
