@@ -6,6 +6,7 @@
 #include <linux/bits.h>
 #include <linux/build_bug.h>
 #include <linux/log2.h>
+#include <linux/mmdebug.h>
 #include <linux/mm_types_task.h>
 #include <linux/types.h>
 
@@ -74,8 +75,45 @@ static inline unsigned int page_frag_cache_page_size(unsigned long encoded_page)
 
 void page_frag_cache_drain(struct page_frag_cache *nc);
 void __page_frag_cache_drain(struct page *page, unsigned int count);
-void *__page_frag_alloc_align(struct page_frag_cache *nc, unsigned int fragsz,
-			      gfp_t gfp_mask, unsigned int align_mask);
+void *__page_frag_cache_prepare(struct page_frag_cache *nc, unsigned int fragsz,
+				struct page_frag *pfrag, gfp_t gfp_mask,
+				unsigned int align_mask);
+
+static inline void __page_frag_cache_commit(struct page_frag_cache *nc,
+					    struct page_frag *pfrag, bool referenced,
+					    unsigned int used_sz)
+{
+	if (referenced) {
+		VM_BUG_ON(!nc->pagecnt_bias);
+		nc->pagecnt_bias--;
+	}
+
+	/* Committed offset might be bigger than the current offset due to alignment */
+	VM_BUG_ON(nc->offset > pfrag->offset);
+
+	VM_BUG_ON(used_sz > pfrag->size);
+	VM_BUG_ON(pfrag->offset + pfrag->size > page_frag_cache_page_size(nc->encoded_page));
+
+	/* Calculate true size for the fragment due to alignment */
+	pfrag->size = pfrag->offset - nc->offset + used_sz;
+
+	nc->offset = pfrag->offset + used_sz;
+}
+
+static inline void *__page_frag_alloc_align(struct page_frag_cache *nc, unsigned int fragsz,
+					     gfp_t gfp_mask, unsigned int align_mask)
+{
+	struct page_frag page_frag;
+	void *va;
+
+	va = __page_frag_cache_prepare(nc, fragsz, &page_frag, gfp_mask, align_mask);
+	if (unlikely(!va))
+		return NULL;
+
+	__page_frag_cache_commit(nc, &page_frag, true, fragsz);
+
+	return va;
+}
 
 static inline void *page_frag_alloc_align(struct page_frag_cache *nc,
 					  unsigned int fragsz, gfp_t gfp_mask,
