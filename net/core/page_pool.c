@@ -24,6 +24,7 @@
 
 #include <trace/events/page_pool.h>
 
+#include "page_pool_dbg.h"
 #include "page_pool_priv.h"
 
 #define DEFER_TIME (msecs_to_jiffies(1000))
@@ -563,7 +564,7 @@ static noinline netmem_ref __page_pool_alloc_pages_slow(struct page_pool *pool,
 /* For using page_pool replace: alloc_pages() API calls, but provide
  * synchronization guarantee for allocation side.
  */
-netmem_ref page_pool_alloc_netmem(struct page_pool *pool, gfp_t gfp)
+static netmem_ref __page_pool_alloc_netmem(struct page_pool *pool, gfp_t gfp)
 {
 	netmem_ref netmem;
 
@@ -574,6 +575,17 @@ netmem_ref page_pool_alloc_netmem(struct page_pool *pool, gfp_t gfp)
 
 	/* Slow-path: cache empty, do real allocation */
 	netmem = __page_pool_alloc_pages_slow(pool, gfp);
+	return netmem;
+}
+
+netmem_ref page_pool_alloc_netmem(struct page_pool *pool, gfp_t gfp)
+{
+	netmem_ref netmem;
+
+	page_pool_debug_alloc_lock(pool, true);
+	netmem = __page_pool_alloc_netmem(pool, gfp);
+	page_pool_debug_alloc_unlock(pool, true);
+
 	return netmem;
 }
 EXPORT_SYMBOL(page_pool_alloc_netmem);
@@ -776,6 +788,8 @@ void page_pool_put_unrefed_netmem(struct page_pool *pool, netmem_ref netmem,
 	if (!allow_direct)
 		allow_direct = page_pool_napi_local(pool);
 
+	page_pool_debug_alloc_lock(pool, allow_direct);
+
 	netmem =
 		__page_pool_put_page(pool, netmem, dma_sync_size, allow_direct);
 	if (netmem && !page_pool_recycle_in_ring(pool, netmem)) {
@@ -783,6 +797,8 @@ void page_pool_put_unrefed_netmem(struct page_pool *pool, netmem_ref netmem,
 		recycle_stat_inc(pool, ring_full);
 		page_pool_return_page(pool, netmem);
 	}
+
+	page_pool_debug_alloc_unlock(pool, allow_direct);
 }
 EXPORT_SYMBOL(page_pool_put_unrefed_netmem);
 
@@ -817,6 +833,7 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 	bool in_softirq;
 
 	allow_direct = page_pool_napi_local(pool);
+	page_pool_debug_alloc_lock(pool, allow_direct);
 
 	for (i = 0; i < count; i++) {
 		netmem_ref netmem = page_to_netmem(virt_to_head_page(data[i]));
@@ -830,6 +847,8 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 		if (netmem)
 			data[bulk_len++] = (__force void *)netmem;
 	}
+
+	page_pool_debug_alloc_unlock(pool, allow_direct);
 
 	if (!bulk_len)
 		return;
@@ -878,10 +897,14 @@ static netmem_ref page_pool_drain_frag(struct page_pool *pool,
 
 static void page_pool_free_frag(struct page_pool *pool)
 {
-	long drain_count = BIAS_MAX - pool->frag_users;
-	netmem_ref netmem = pool->frag_page;
+	netmem_ref netmem;
+	long drain_count;
 
+	page_pool_debug_alloc_lock(pool, true);
+	drain_count = BIAS_MAX - pool->frag_users;
+	netmem = pool->frag_page;
 	pool->frag_page = 0;
+	page_pool_debug_alloc_unlock(pool, true);
 
 	if (!netmem || page_pool_unref_netmem(netmem, drain_count))
 		return;
@@ -899,6 +922,7 @@ netmem_ref page_pool_alloc_frag_netmem(struct page_pool *pool,
 	if (WARN_ON(size > max_size))
 		return 0;
 
+	page_pool_debug_alloc_lock(pool, true);
 	size = ALIGN(size, dma_get_cache_alignment());
 	*offset = pool->frag_offset;
 
@@ -911,9 +935,10 @@ netmem_ref page_pool_alloc_frag_netmem(struct page_pool *pool,
 	}
 
 	if (!netmem) {
-		netmem = page_pool_alloc_netmem(pool, gfp);
+		netmem = __page_pool_alloc_netmem(pool, gfp);
 		if (unlikely(!netmem)) {
 			pool->frag_page = 0;
+			page_pool_debug_alloc_unlock(pool, true);
 			return 0;
 		}
 
@@ -924,12 +949,14 @@ frag_reset:
 		*offset = 0;
 		pool->frag_offset = size;
 		page_pool_fragment_netmem(netmem, BIAS_MAX);
+		page_pool_debug_alloc_unlock(pool, true);
 		return netmem;
 	}
 
 	pool->frag_users++;
 	pool->frag_offset = *offset + size;
 	alloc_stat_inc(pool, fast);
+	page_pool_debug_alloc_unlock(pool, true);
 	return netmem;
 }
 EXPORT_SYMBOL(page_pool_alloc_frag_netmem);
@@ -986,8 +1013,10 @@ static void page_pool_empty_alloc_cache_once(struct page_pool *pool)
 
 static void page_pool_scrub(struct page_pool *pool)
 {
+	__page_pool_debug_alloc_lock(pool, true, false);
 	page_pool_empty_alloc_cache_once(pool);
 	pool->destroy_cnt++;
+	__page_pool_debug_alloc_unlock(pool, true, false);
 
 	/* No more consumers should exist, but producers could still
 	 * be in-flight.
@@ -1089,6 +1118,8 @@ void page_pool_update_nid(struct page_pool *pool, int new_nid)
 {
 	netmem_ref netmem;
 
+	page_pool_debug_alloc_lock(pool, true);
+
 	trace_page_pool_update_nid(pool, new_nid);
 	pool->p.nid = new_nid;
 
@@ -1097,5 +1128,7 @@ void page_pool_update_nid(struct page_pool *pool, int new_nid)
 		netmem = pool->alloc.cache[--pool->alloc.count];
 		page_pool_return_page(pool, netmem);
 	}
+
+	page_pool_debug_alloc_unlock(pool, true);
 }
 EXPORT_SYMBOL(page_pool_update_nid);
