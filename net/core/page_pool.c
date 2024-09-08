@@ -759,6 +759,16 @@ __page_pool_put_page(struct page_pool *pool, netmem_ref netmem,
 	return 0;
 }
 
+static void page_pool_put_page_begin(void)
+{
+	rcu_read_lock();
+}
+
+static void page_pool_put_page_end(void)
+{
+	rcu_read_unlock();
+}
+
 static bool page_pool_napi_local(const struct page_pool *pool)
 {
 	const struct napi_struct *napi;
@@ -785,6 +795,8 @@ static bool page_pool_napi_local(const struct page_pool *pool)
 void page_pool_put_unrefed_netmem(struct page_pool *pool, netmem_ref netmem,
 				  unsigned int dma_sync_size, bool allow_direct)
 {
+	page_pool_put_page_begin();
+
 	if (!allow_direct)
 		allow_direct = page_pool_napi_local(pool);
 
@@ -799,6 +811,7 @@ void page_pool_put_unrefed_netmem(struct page_pool *pool, netmem_ref netmem,
 	}
 
 	page_pool_debug_alloc_unlock(pool, allow_direct);
+	page_pool_put_page_end();
 }
 EXPORT_SYMBOL(page_pool_put_unrefed_netmem);
 
@@ -832,6 +845,7 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 	bool allow_direct;
 	bool in_softirq;
 
+	page_pool_put_page_begin();
 	allow_direct = page_pool_napi_local(pool);
 	page_pool_debug_alloc_lock(pool, allow_direct);
 
@@ -849,6 +863,7 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 	}
 
 	page_pool_debug_alloc_unlock(pool, allow_direct);
+	page_pool_put_page_end();
 
 	if (!bulk_len)
 		return;
@@ -1078,7 +1093,7 @@ void page_pool_disable_direct_recycling(struct page_pool *pool)
 	WRITE_ONCE(pool->cpuid, -1);
 
 	if (!pool->p.napi)
-		return;
+		goto out;
 
 	/* To avoid races with recycling and additional barriers make sure
 	 * pool and NAPI are unlinked when NAPI is disabled.
@@ -1087,6 +1102,8 @@ void page_pool_disable_direct_recycling(struct page_pool *pool)
 	WARN_ON(READ_ONCE(pool->p.napi->list_owner) != -1);
 
 	WRITE_ONCE(pool->p.napi, NULL);
+out:
+	synchronize_rcu();
 }
 EXPORT_SYMBOL(page_pool_disable_direct_recycling);
 
