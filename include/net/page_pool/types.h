@@ -222,6 +222,8 @@ struct page_pool {
 #endif
 	atomic_t pages_state_release_cnt;
 
+	atomic_t put_ctx_cnt;
+
 	/* A page_pool is strictly tied to a single RX-queue being
 	 * protected by NAPI, due to above pp_alloc_cache. This
 	 * refcnt serves purpose is to simplify drivers error handling.

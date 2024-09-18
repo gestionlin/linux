@@ -267,6 +267,7 @@ static int page_pool_init(struct page_pool *pool,
 		return -ENOMEM;
 	}
 
+	atomic_set(&pool->put_ctx_cnt, 0);
 	atomic_set(&pool->pages_state_release_cnt, 0);
 
 	/* Driver calling page_pool_create() also call page_pool_destroy() */
@@ -815,11 +816,38 @@ static bool page_pool_napi_local(const struct page_pool *pool)
 	return napi && READ_ONCE(napi->list_owner) == cpuid;
 }
 
+static void page_pool_put_ctx_begin(struct page_pool *pool)
+{
+	atomic_inc_return_acquire(&pool->put_ctx_cnt);
+}
+
+static void page_pool_put_ctx_end(struct page_pool *pool)
+{
+	int ret = atomic_dec_return_release(&pool->put_ctx_cnt);
+	DEBUG_NET_WARN_ON_ONCE(ret < 0);
+}
+
+static void page_pool_synchronize_put_ctx(struct page_pool *pool)
+{
+	might_sleep();
+	while (atomic_read_acquire(&pool->put_ctx_cnt) > 0)
+		usleep_range(1, 10);
+}
+
 void page_pool_put_unrefed_netmem(struct page_pool *pool, netmem_ref netmem,
 				  unsigned int dma_sync_size, bool allow_direct)
 {
-	if (!allow_direct)
+	bool allow_direct_orig = allow_direct;
+
+	/* page_pool_put_unrefed_netmem() is not supposed to be called with
+	 * allow_direct being true after page_pool_destroy() is called, so
+	 * the allow_direct being true case doesn't need synchronization.
+	 */
+	DEBUG_NET_WARN_ON_ONCE(allow_direct && pool->destroy_cnt);
+	if (!allow_direct_orig) {
+		page_pool_put_ctx_begin(pool);
 		allow_direct = page_pool_napi_local(pool);
+	}
 
 	netmem =
 		__page_pool_put_page(pool, netmem, dma_sync_size, allow_direct);
@@ -828,6 +856,9 @@ void page_pool_put_unrefed_netmem(struct page_pool *pool, netmem_ref netmem,
 		recycle_stat_inc(pool, ring_full);
 		page_pool_return_page(pool, netmem);
 	}
+
+	if (!allow_direct_orig)
+		page_pool_put_ctx_end(pool);
 }
 EXPORT_SYMBOL(page_pool_put_unrefed_netmem);
 
@@ -861,6 +892,7 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 	bool allow_direct;
 	bool in_softirq;
 
+	page_pool_put_ctx_begin(pool);
 	allow_direct = page_pool_napi_local(pool);
 
 	for (i = 0; i < count; i++) {
@@ -876,8 +908,10 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 			data[bulk_len++] = (__force void *)netmem;
 	}
 
-	if (!bulk_len)
+	if (!bulk_len) {
+		page_pool_put_ctx_end(pool);
 		return;
+	}
 
 	/* Bulk producer into ptr_ring page_pool cache */
 	in_softirq = page_pool_producer_lock(pool);
@@ -892,14 +926,18 @@ void page_pool_put_page_bulk(struct page_pool *pool, void **data,
 	page_pool_producer_unlock(pool, in_softirq);
 
 	/* Hopefully all pages was return into ptr_ring */
-	if (likely(i == bulk_len))
+	if (likely(i == bulk_len)) {
+		page_pool_put_ctx_end(pool);
 		return;
+	}
 
 	/* ptr_ring cache full, free remaining pages outside producer lock
 	 * since put_page() with refcnt == 1 can be an expensive operation
 	 */
 	for (; i < bulk_len; i++)
 		page_pool_return_page(pool, (__force netmem_ref)data[i]);
+
+	page_pool_put_ctx_end(pool);
 }
 EXPORT_SYMBOL(page_pool_put_page_bulk);
 
@@ -1121,6 +1159,12 @@ void page_pool_destroy(struct page_pool *pool)
 		return;
 
 	page_pool_disable_direct_recycling(pool);
+
+	/* Wait for the freeing side see the disabling direct recycling setting
+	 * to avoid the concurrent access to the pool->alloc cache.
+	 */
+	page_pool_synchronize_put_ctx(pool);
+
 	page_pool_free_frag(pool);
 
 	if (!page_pool_release(pool))
