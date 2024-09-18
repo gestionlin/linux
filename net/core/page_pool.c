@@ -61,6 +61,7 @@ static const char pp_stats[][ETH_GSTRING_LEN] = {
 	"rx_pp_alloc_empty",
 	"rx_pp_alloc_refill",
 	"rx_pp_alloc_waive",
+	"rx_pp_alloc_item_full",
 	"rx_pp_recycle_cached",
 	"rx_pp_recycle_cache_full",
 	"rx_pp_recycle_ring",
@@ -94,6 +95,7 @@ bool page_pool_get_stats(const struct page_pool *pool,
 	stats->alloc_stats.empty += pool->alloc_stats.empty;
 	stats->alloc_stats.refill += pool->alloc_stats.refill;
 	stats->alloc_stats.waive += pool->alloc_stats.waive;
+	stats->alloc_stats.item_full += pool->alloc_stats.item_full;
 
 	for_each_possible_cpu(cpu) {
 		const struct page_pool_recycle_stats *pcpu =
@@ -139,6 +141,7 @@ u64 *page_pool_ethtool_stats_get(u64 *data, const void *stats)
 	*data++ = pool_stats->alloc_stats.empty;
 	*data++ = pool_stats->alloc_stats.refill;
 	*data++ = pool_stats->alloc_stats.waive;
+	*data++ = pool_stats->alloc_stats.item_full;
 	*data++ = pool_stats->recycle_stats.cached;
 	*data++ = pool_stats->recycle_stats.cache_full;
 	*data++ = pool_stats->recycle_stats.ring;
@@ -273,9 +276,6 @@ static int page_pool_init(struct page_pool *pool,
 	/* Driver calling page_pool_create() also call page_pool_destroy() */
 	refcount_set(&pool->user_cnt, 1);
 
-	if (pool->dma_map)
-		get_device(pool->p.dev);
-
 	if (pool->slow.flags & PP_FLAG_ALLOW_UNREADABLE_NETMEM) {
 		/* We rely on rtnl_lock()ing to make sure netdev_rx_queue
 		 * configuration doesn't change while we're initializing
@@ -313,13 +313,107 @@ static void page_pool_uninit(struct page_pool *pool)
 {
 	ptr_ring_cleanup(&pool->ring, NULL);
 
-	if (pool->dma_map)
-		put_device(pool->p.dev);
-
 #ifdef CONFIG_PAGE_POOL_STATS
 	if (!pool->system)
 		free_percpu(pool->recycle_stats);
 #endif
+}
+
+static void page_pool_item_init(struct page_pool *pool, unsigned int item_cnt)
+{
+	struct page_pool_item *items = pool->items;
+	unsigned int i;
+
+	WARN_ON_ONCE(!is_power_of_2(item_cnt));
+
+	init_llist_head(&pool->hold_items);
+	init_llist_head(&pool->release_items);
+
+	for (i = 0; i < item_cnt; i++) {
+		items[i].pp = pool;
+		__llist_add(&items[i].lentry, &pool->hold_items);
+	}
+}
+
+#define PAGE_POOL_MIN_INFLIGHT_ITEMS	512
+#define PAGE_POOL_PUT_CTX_CNT_BIAS	(-1U << 31)
+static void page_pool_item_uninit(struct page_pool *pool)
+{
+	struct page_pool_item *items = pool->items;
+	unsigned int unmapped = 0;
+	unsigned int item_cnt, i;
+	int val;
+
+	if (!pool->dma_map || pool->mp_priv)
+		return;
+
+	item_cnt = pool->p.pool_size + PP_ALLOC_CACHE_SIZE +
+		PAGE_POOL_MIN_INFLIGHT_ITEMS;
+	item_cnt = roundup_pow_of_two(item_cnt);
+
+	val = atomic_add_return_acquire(PAGE_POOL_PUT_CTX_CNT_BIAS,
+					&pool->put_ctx_cnt);
+	/* Wait for any pending put context to finish */
+	while (val != PAGE_POOL_PUT_CTX_CNT_BIAS) {
+		might_sleep();
+		usleep_range(1, 10);
+		val = atomic_read_acquire(&pool->put_ctx_cnt);
+	}
+
+	for (i = 0; i < item_cnt; i++) {
+		struct page *page;
+
+		page = netmem_to_page(READ_ONCE(items[i].pp_netmem));
+		if (!page)
+			continue;
+
+		unmapped++;
+		dma_unmap_page_attrs(pool->p.dev, page_pool_get_dma_addr(page),
+				     PAGE_SIZE << pool->p.order,
+				     pool->p.dma_dir, DMA_ATTR_SKIP_CPU_SYNC |
+				     DMA_ATTR_WEAK_ORDERING);
+		page_pool_set_dma_addr(page, 0);
+	}
+
+	WARN_ONCE(unmapped != page_pool_inflight(pool, false),
+		  "page_pool(%u) unmapped pages(%u) != inflight pages(%d)\n",
+		  pool->user.id, unmapped, page_pool_inflight(pool, false));
+
+	pool->dma_map = false;
+	atomic_sub_return_release(PAGE_POOL_PUT_CTX_CNT_BIAS,
+				  &pool->put_ctx_cnt);
+}
+
+static bool page_pool_item_add(struct page_pool *pool, netmem_ref netmem)
+{
+	struct page_pool_item *item;
+	struct llist_node *node;
+
+	if (unlikely(llist_empty(&pool->hold_items))) {
+		if (unlikely(llist_empty(&pool->release_items))) {
+			alloc_stat_inc(pool, item_full);
+			return false;
+		}
+
+		pool->hold_items.first = llist_del_all(&pool->release_items);
+	}
+
+	node = pool->hold_items.first;
+	pool->hold_items.first = node->next;
+	item = llist_entry(node, struct page_pool_item, lentry);
+	item->pp_netmem = netmem;
+	netmem_set_pp_item(netmem, item);
+	return true;
+}
+
+static void page_pool_item_del(struct page_pool *pool, netmem_ref netmem)
+{
+	struct page_pool_item *item = netmem_to_page(netmem)->pp_item;
+
+	DEBUG_NET_WARN_ON_ONCE(item->pp_netmem != netmem);
+	item->pp_netmem = (netmem_ref)NULL;
+	llist_add(&item->lentry, &pool->release_items);
+	netmem_set_pp_item(netmem, NULL);
 }
 
 /**
@@ -330,16 +424,22 @@ static void page_pool_uninit(struct page_pool *pool)
 struct page_pool *
 page_pool_create_percpu(const struct page_pool_params *params, int cpuid)
 {
+	unsigned int item_cnt = (params->pool_size ? : 1024) +
+				PP_ALLOC_CACHE_SIZE + PAGE_POOL_MIN_INFLIGHT_ITEMS;
 	struct page_pool *pool;
 	int err;
 
-	pool = kzalloc_node(sizeof(*pool), GFP_KERNEL, params->nid);
+	item_cnt = roundup_pow_of_two(item_cnt);
+	pool = kvzalloc_node(struct_size(pool, items, item_cnt), GFP_KERNEL,
+			     params->nid);
 	if (!pool)
 		return ERR_PTR(-ENOMEM);
 
 	err = page_pool_init(pool, params, cpuid);
 	if (err < 0)
 		goto err_free;
+
+	page_pool_item_init(pool, item_cnt);
 
 	err = page_pool_list(pool);
 	if (err)
@@ -351,7 +451,7 @@ err_uninit:
 	page_pool_uninit(pool);
 err_free:
 	pr_warn("%s() gave up with errno %d\n", __func__, err);
-	kfree(pool);
+	kvfree(pool);
 	return ERR_PTR(err);
 }
 EXPORT_SYMBOL(page_pool_create_percpu);
@@ -500,19 +600,24 @@ static struct page *__page_pool_alloc_page_order(struct page_pool *pool,
 	if (unlikely(!page))
 		return NULL;
 
-	if (pool->dma_map && unlikely(!page_pool_dma_map(pool, page_to_netmem(page)))) {
-		put_page(page);
-		return NULL;
-	}
+	if (unlikely(!page_pool_set_pp_info(pool, page_to_netmem(page))))
+		goto err_alloc;
+
+	if (pool->dma_map && unlikely(!page_pool_dma_map(pool, page_to_netmem(page))))
+		goto err_set_info;
 
 	alloc_stat_inc(pool, slow_high_order);
-	page_pool_set_pp_info(pool, page_to_netmem(page));
 
 	/* Track how many pages are held 'in-flight' */
 	pool->pages_state_hold_cnt++;
 	trace_page_pool_state_hold(pool, page_to_netmem(page),
 				   pool->pages_state_hold_cnt);
 	return page;
+err_set_info:
+	page_pool_clear_pp_info(pool, page_to_netmem(page));
+err_alloc:
+	put_page(page);
+	return NULL;
 }
 
 /* slow path */
@@ -547,12 +652,18 @@ static noinline netmem_ref __page_pool_alloc_pages_slow(struct page_pool *pool,
 	 */
 	for (i = 0; i < nr_pages; i++) {
 		netmem = pool->alloc.cache[i];
-		if (dma_map && unlikely(!page_pool_dma_map(pool, netmem))) {
+
+		if (unlikely(!page_pool_set_pp_info(pool, netmem))) {
 			put_page(netmem_to_page(netmem));
 			continue;
 		}
 
-		page_pool_set_pp_info(pool, netmem);
+		if (dma_map && unlikely(!page_pool_dma_map(pool, netmem))) {
+			page_pool_clear_pp_info(pool, netmem);
+			put_page(netmem_to_page(netmem));
+			continue;
+		}
+
 		pool->alloc.cache[pool->alloc.count++] = netmem;
 		/* Track how many pages are held 'in-flight' */
 		pool->pages_state_hold_cnt++;
@@ -624,9 +735,13 @@ s32 page_pool_inflight(const struct page_pool *pool, bool strict)
 	return inflight;
 }
 
-void page_pool_set_pp_info(struct page_pool *pool, netmem_ref netmem)
+bool page_pool_set_pp_info(struct page_pool *pool, netmem_ref netmem)
 {
-	netmem_set_pp(netmem, pool);
+	if (unlikely(!page_pool_item_add(pool, netmem)))
+		return false;
+
+	DEBUG_NET_WARN_ON_ONCE(page_pool_to_pp(netmem_to_page(netmem)) != pool);
+
 	netmem_or_pp_magic(netmem, PP_SIGNATURE);
 
 	/* Ensuring all pages have been split into one fragment initially:
@@ -638,12 +753,14 @@ void page_pool_set_pp_info(struct page_pool *pool, netmem_ref netmem)
 	page_pool_fragment_netmem(netmem, 1);
 	if (pool->has_init_callback)
 		pool->slow.init_callback(netmem, pool->slow.init_arg);
+
+	return true;
 }
 
-void page_pool_clear_pp_info(netmem_ref netmem)
+void page_pool_clear_pp_info(struct page_pool *pool, netmem_ref netmem)
 {
 	netmem_clear_pp_magic(netmem);
-	netmem_set_pp(netmem, NULL);
+	page_pool_item_del(pool, netmem);
 }
 
 static __always_inline void __page_pool_release_page_dma(struct page_pool *pool,
@@ -689,9 +806,10 @@ void page_pool_return_page(struct page_pool *pool, netmem_ref netmem)
 	trace_page_pool_state_release(pool, netmem, count);
 
 	if (put) {
-		page_pool_clear_pp_info(netmem);
+		page_pool_clear_pp_info(pool, netmem);
 		put_page(netmem_to_page(netmem));
 	}
+
 	/* An optimization would be to call __free_pages(page, pool->p.order)
 	 * knowing page is not part of page-cache (thus avoiding a
 	 * __page_cache_release() call).
@@ -818,7 +936,11 @@ static bool page_pool_napi_local(const struct page_pool *pool)
 
 static void page_pool_put_ctx_begin(struct page_pool *pool)
 {
-	atomic_inc_return_acquire(&pool->put_ctx_cnt);
+	/* Wait for page_pool_item_uninit() to do the dma unmapping for
+	 * inflight pages in page_pool_destroy(), which is an unlikely case.
+	 */
+	while(!atomic_inc_unless_negative(&pool->put_ctx_cnt))
+		udelay(1);
 }
 
 static void page_pool_put_ctx_end(struct page_pool *pool)
@@ -1053,7 +1175,7 @@ static void __page_pool_destroy(struct page_pool *pool)
 		static_branch_dec(&page_pool_mem_providers);
 	}
 
-	kfree(pool);
+	kvfree(pool);
 }
 
 static void page_pool_empty_alloc_cache_once(struct page_pool *pool)
@@ -1158,10 +1280,13 @@ void page_pool_destroy(struct page_pool *pool)
 	if (!page_pool_put(pool))
 		return;
 
+	/* disable dma_sync_for_device */
+	pool->dma_sync = false;
+
 	page_pool_disable_direct_recycling(pool);
 
-	/* Wait for the freeing side see the disabling direct recycling setting
-	 * to avoid the concurrent access to the pool->alloc cache.
+	/* Wait for the freeing side to see the new pool->dma_sync,
+	 * disable_direct and pool->destroy_cnt in page_pool_put_page.
 	 */
 	page_pool_synchronize_put_ctx(pool);
 
@@ -1169,6 +1294,8 @@ void page_pool_destroy(struct page_pool *pool)
 
 	if (!page_pool_release(pool))
 		return;
+
+	page_pool_item_uninit(pool);
 
 	page_pool_detached(pool);
 	pool->defer_start = jiffies;
