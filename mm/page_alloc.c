@@ -1206,6 +1206,91 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	spin_unlock_irqrestore(&zone->lock, flags);
 }
 
+static void free_pcppages_to_pzp(struct zone *zone, int count,
+				 struct per_cpu_pages *pcp, int pindex)
+{
+	struct per_zone_pages *pzp = &zone->per_zone_pages;
+	int orig_pindex = pindex - 1;
+	unsigned long flags;
+	unsigned int order;
+	struct page *page;
+	int pzp_cnt;
+	int i;
+
+	/*
+	 * Ensure proper count is passed which otherwise would stuck in the
+	 * below while (list_empty(list)) loop.
+	 */
+	count = min(pcp->count, count);
+
+	/* Ensure requested pindex is drained first. */
+	pindex = orig_pindex;
+
+	for (i = 0; i < NR_PCP_LISTS && count > 0; i++) {
+		struct llist_head *llist;
+		struct list_head *list;
+		int nr_pages;
+
+		if (++pindex > NR_PCP_LISTS - 1)
+			pindex = 0;
+
+		list = &pcp->lists[pindex];
+		pzp_cnt = atomic_read(&pzp->lists_cnt[pindex]);
+		if (list_empty(list) || pzp_cnt > zone->pageset_batch)
+			continue;
+
+		llist = &pzp->lists[pindex];
+		order = pindex_to_order(pindex);
+		nr_pages = 1 << order;
+
+		while (pzp_cnt < zone->pageset_batch && count > 0 &&
+		       !list_empty(list)) {
+			page = list_last_entry(list, struct page, pcp_list);
+			list_del(&page->pcp_list);
+			count -= nr_pages;
+			pcp->count -= nr_pages;
+			llist_add(&page->pzp_list, llist);
+			pzp_cnt = atomic_inc_return(&pzp->lists_cnt[pindex]);
+		}
+	}
+
+	pindex = orig_pindex;
+	spin_lock_irqsave(&zone->lock, flags);
+
+	while (count > 0) {
+		struct list_head *list;
+		int nr_pages;
+
+		/* Remove pages from lists in a round-robin fashion. */
+		do {
+			if (++pindex > NR_PCP_LISTS - 1)
+				pindex = 0;
+			list = &pcp->lists[pindex];
+		} while (list_empty(list));
+
+		order = pindex_to_order(pindex);
+		nr_pages = 1 << order;
+		do {
+			unsigned long pfn;
+			int mt;
+
+			page = list_last_entry(list, struct page, pcp_list);
+			pfn = page_to_pfn(page);
+			mt = get_pfnblock_migratetype(page, pfn);
+
+			/* must delete to avoid corrupting pcp list */
+			list_del(&page->pcp_list);
+			count -= nr_pages;
+			pcp->count -= nr_pages;
+
+			__free_one_page(page, pfn, zone, order, mt, FPI_NONE);
+			trace_mm_page_pcpu_drain(page, order, mt);
+		} while (count > 0 && !list_empty(list));
+	}
+
+	spin_unlock_irqrestore(&zone->lock, flags);
+}
+
 /* Split a multi-block free page into its individual pageblocks. */
 static void split_large_buddy(struct zone *zone, struct page *page,
 			      unsigned long pfn, int order, fpi_t fpi)
@@ -2507,7 +2592,7 @@ static int nr_pcp_free(struct per_cpu_pages *pcp, int batch, int high, bool free
 		return min(pcp->count, batch << CONFIG_PCP_BATCH_SCALE_MAX);
 
 	/* Check for PCP disabled or boot pageset */
-	if (unlikely(high < batch))
+	if (unlikely(!(pcp->flags & PCPF_CACHE_ENABLE)))
 		return 1;
 
 	/* Leave at least pcp->batch pages on the list */
@@ -2532,7 +2617,7 @@ static int nr_pcp_high(struct per_cpu_pages *pcp, struct zone *zone,
 	high_max = READ_ONCE(pcp->high_max);
 	high = pcp->high = clamp(pcp->high, high_min, high_max);
 
-	if (unlikely(!high))
+	if (unlikely(!(pcp->flags & PCPF_CACHE_ENABLE)))
 		return 0;
 
 	if (unlikely(free_high)) {
@@ -2610,8 +2695,9 @@ static void free_unref_page_commit(struct zone *zone, struct per_cpu_pages *pcp,
 		pcp->free_count += (1 << order);
 	high = nr_pcp_high(pcp, zone, batch, free_high);
 	if (pcp->count >= high) {
-		free_pcppages_bulk(zone, nr_pcp_free(pcp, batch, high, free_high),
-				   pcp, pindex);
+		free_pcppages_to_pzp(zone,
+				     nr_pcp_free(pcp, batch, high, free_high),
+				     pcp, pindex);
 		if (test_bit(ZONE_BELOW_HIGH, &zone->flags) &&
 		    zone_watermark_ok(zone, 0, high_wmark_pages(zone),
 				      ZONE_MOVABLE, 0))
@@ -2926,7 +3012,7 @@ static int nr_pcp_alloc(struct per_cpu_pages *pcp, struct zone *zone, int order)
 	high = pcp->high = clamp(pcp->high, high_min, high_max);
 
 	/* Check for PCP disabled or boot pageset */
-	if (unlikely(high < base_batch))
+	if (unlikely(!(pcp->flags & PCPF_CACHE_ENABLE)))
 		return 1;
 
 	if (order)
@@ -2977,16 +3063,28 @@ struct page *__rmqueue_pcplist(struct zone *zone, unsigned int order,
 
 	do {
 		if (list_empty(list)) {
+			int pindex = order_to_pindex(migratetype, order);
 			int batch = nr_pcp_alloc(pcp, zone, order);
+			struct llist_node *llist;
 			int alloced;
 
-			alloced = rmqueue_bulk(zone, order,
-					batch, list,
-					migratetype, alloc_flags);
+			llist = llist_del_all(&zone->per_zone_pages.lists[pindex]);
+			if (llist) {
+				struct page *tmp;
 
-			pcp->count += alloced << order;
-			if (unlikely(list_empty(list)))
-				return NULL;
+				llist_for_each_entry_safe(page, tmp, llist, pzp_list) {
+					pcp->count += 1 << order;
+					list_add(&page->pcp_list, list);
+				}
+			} else {
+				alloced = rmqueue_bulk(zone, order,
+						batch, list,
+						migratetype, alloc_flags);
+
+				pcp->count += alloced << order;
+				if (unlikely(list_empty(list)))
+					return NULL;
+			}
 		}
 
 		page = list_first_entry(list, struct page, pcp_list);
@@ -5625,6 +5723,16 @@ static void pageset_update(struct per_cpu_pages *pcp, unsigned long high_min,
 	WRITE_ONCE(pcp->high_max, high_max);
 }
 
+static void per_zone_pages_init(struct per_zone_pages *pzp)
+{
+	int pindex;
+
+	for (pindex = 0; pindex < NR_PCP_LISTS; pindex++) {
+		init_llist_head(&pzp->lists[pindex]);
+		atomic_set(&pzp->lists_cnt[pindex], 0);
+	}
+}
+
 static void per_cpu_pages_init(struct per_cpu_pages *pcp, struct per_cpu_zonestat *pzstats)
 {
 	int pindex;
@@ -5646,6 +5754,7 @@ static void per_cpu_pages_init(struct per_cpu_pages *pcp, struct per_cpu_zonesta
 	pcp->high_max = BOOT_PAGESET_HIGH;
 	pcp->batch = BOOT_PAGESET_BATCH;
 	pcp->free_count = 0;
+	pcp->flags &= ~PCPF_CACHE_ENABLE;
 }
 
 static void __zone_set_pageset_high_and_batch(struct zone *zone, unsigned long high_min,
@@ -5657,6 +5766,7 @@ static void __zone_set_pageset_high_and_batch(struct zone *zone, unsigned long h
 	for_each_possible_cpu(cpu) {
 		pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
 		pageset_update(pcp, high_min, high_max, batch);
+		pcp->flags |= PCPF_CACHE_ENABLE;
 	}
 }
 
@@ -5715,6 +5825,7 @@ void __meminit setup_zone_pageset(struct zone *zone)
 	}
 
 	zone_set_pageset_high_and_batch(zone, 0);
+	per_zone_pages_init(&zone->per_zone_pages);
 }
 
 /*
@@ -6751,6 +6862,28 @@ void free_contig_range(unsigned long pfn, unsigned long nr_pages)
 }
 EXPORT_SYMBOL(free_contig_range);
 
+static void __zone_enable_pcp_cache(struct zone *zone)
+{
+	struct per_cpu_pages *pcp;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
+		pcp->flags |= PCPF_CACHE_ENABLE;
+	}
+}
+
+static void __zone_disable_pcp_cache(struct zone *zone)
+{
+	struct per_cpu_pages *pcp;
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
+		pcp->flags &= ~PCPF_CACHE_ENABLE;
+	}
+}
+
 /*
  * Effectively disable pcplists for the zone by setting the high limit to 0
  * and draining all cpus. A concurrent page freeing on another CPU that's about
@@ -6762,14 +6895,13 @@ EXPORT_SYMBOL(free_contig_range);
 void zone_pcp_disable(struct zone *zone)
 {
 	mutex_lock(&pcp_batch_high_lock);
-	__zone_set_pageset_high_and_batch(zone, 0, 0, 1);
+	__zone_disable_pcp_cache(zone);
 	__drain_all_pages(zone, true);
 }
 
 void zone_pcp_enable(struct zone *zone)
 {
-	__zone_set_pageset_high_and_batch(zone, zone->pageset_high_min,
-		zone->pageset_high_max, zone->pageset_batch);
+	__zone_enable_pcp_cache(zone);
 	mutex_unlock(&pcp_batch_high_lock);
 }
 

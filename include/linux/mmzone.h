@@ -666,6 +666,12 @@ enum zone_watermarks {
 #define NR_LOWORDER_PCP_LISTS (MIGRATE_PCPTYPES * (PAGE_ALLOC_COSTLY_ORDER + 1))
 #define NR_PCP_LISTS (NR_LOWORDER_PCP_LISTS + NR_PCP_THP)
 
+struct per_zone_pages {
+	struct llist_head lists[NR_PCP_LISTS];
+	unsigned long accessed;
+	atomic_t lists_cnt[NR_PCP_LISTS];
+};
+
 /*
  * Flags used in pcp->flags field.
  *
@@ -680,6 +686,7 @@ enum zone_watermarks {
  */
 #define	PCPF_PREV_FREE_HIGH_ORDER	BIT(0)
 #define	PCPF_FREE_HIGH_BATCH		BIT(1)
+#define	PCPF_CACHE_ENABLE		BIT(2)
 
 struct per_cpu_pages {
 	spinlock_t lock;	/* Protects lists field */
@@ -840,6 +847,7 @@ struct zone {
 	int node;
 #endif
 	struct pglist_data	*zone_pgdat;
+	struct per_zone_pages	per_zone_pages;
 	struct per_cpu_pages	__percpu *per_cpu_pageset;
 	struct per_cpu_zonestat	__percpu *per_cpu_zonestats;
 	/*
