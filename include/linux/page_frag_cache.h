@@ -362,6 +362,25 @@ page_frag_refill_commit_noref(struct page_frag_cache *nc,
 	return __page_frag_cache_commit_noref(nc, pfrag, used_sz);
 }
 
+/**
+ * page_frag_alloc_abort - Abort the page fragment allocation.
+ * @nc: page_frag cache to which the page fragment is aborted back
+ * @fragsz: size of the page fragment to be aborted
+ *
+ * It is expected to be called from the same context as the allocation API.
+ * Mostly used for error handling cases where the fragment is no longer needed
+ * and knowing that no one else is taking extra reference to the just allocated
+ * fragment.
+ */
+static inline void page_frag_alloc_abort(struct page_frag_cache *nc,
+					 unsigned int fragsz)
+{
+	VM_BUG_ON(fragsz > nc->offset);
+
+	nc->pagecnt_bias++;
+	nc->offset -= fragsz;
+}
+
 void page_frag_free(void *addr);
 
 #endif

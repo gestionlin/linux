@@ -135,6 +135,7 @@ as possible.
                  __page_frag_alloc_refill_prepare_align
                  page_frag_alloc_refill_prepare_align
                  page_frag_alloc_refill_probe page_frag_refill_probe
+                 page_frag_alloc_abort
 
 .. kernel-doc:: mm/page_frag_cache.c
    :identifiers: page_frag_cache_drain page_frag_free
@@ -165,8 +166,10 @@ Allocation & freeing API
         goto do_error;
 
     err = do_something(va, size);
-    if (err)
+    if (err) {
+        page_frag_alloc_abort(nc, size);
         goto do_error;
+    }
 
     ...
 
