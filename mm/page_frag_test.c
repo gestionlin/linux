@@ -148,6 +148,10 @@ static int objpool_try_add_slot(void *obj, struct objpool_head *pool, int cpu)
 
 	/* now the tail position is reserved for the given obj */
 	WRITE_ONCE(slot->entries[tail & slot->mask], obj);
+
+	while(READ_ONCE(slot->last) != tail)
+		;
+
 	/* update sequence to make this obj available for pop() */
 	smp_store_release(&slot->last, tail + 1);
 
@@ -157,14 +161,32 @@ static int objpool_try_add_slot(void *obj, struct objpool_head *pool, int cpu)
 /* reclaim an object to object pool */
 static int objpool_push(void *obj, struct objpool_head *pool)
 {
+	const struct cpumask *prev = cpu_none_mask;
+	int numa_node = numa_mem_id();
+	const struct cpumask *mask;
 	unsigned long flags;
+	int start_cpu, cpu;
 	int rc;
 
 	/* disable local irq to avoid preemption & interruption */
 	raw_local_irq_save(flags);
-	rc = objpool_try_add_slot(obj, pool, raw_smp_processor_id());
-	raw_local_irq_restore(flags);
+	rcu_read_lock();
 
+	start_cpu = raw_smp_processor_id();
+	for_each_numa_hop_mask(mask, numa_node) {
+		for_each_cpu_andnot_wrap(cpu, mask, prev, start_cpu) {
+			rc = objpool_try_add_slot(obj, pool, cpu);
+			if (!rc)
+				goto out;
+		}
+
+		start_cpu = 0;
+		prev = mask;
+	}
+
+out:
+	rcu_read_unlock();
+	raw_local_irq_restore(flags);
 	return rc;
 }
 
