@@ -209,20 +209,31 @@ static void *objpool_try_get_slot(struct objpool_head *pool, int cpu)
 /* allocate an object from object pool */
 static void *objpool_pop(struct objpool_head *pool)
 {
+	const struct cpumask *prev = cpu_none_mask;
+	int numa_node = numa_mem_id();
+	const struct cpumask *mask;
 	void *obj = NULL;
 	unsigned long flags;
-	int i, cpu;
+	int start_cpu, cpu;
 
 	/* disable local irq to avoid preemption & interruption */
 	raw_local_irq_save(flags);
+	rcu_read_lock();
 
-	cpu = raw_smp_processor_id();
-	for (i = 0; i < num_possible_cpus(); i++) {
-		obj = objpool_try_get_slot(pool, cpu);
-		if (obj)
-			break;
-		cpu = cpumask_next_wrap(cpu, cpu_possible_mask, -1, 1);
+	start_cpu = raw_smp_processor_id();
+	for_each_numa_hop_mask(mask, numa_node) {
+		for_each_cpu_andnot_wrap(cpu, mask, prev, start_cpu) {
+			obj = objpool_try_get_slot(pool, cpu);
+			if (obj)
+				goto out;
+		}
+
+		start_cpu = 0;
+		prev = mask;
 	}
+
+out:
+	rcu_read_unlock();
 	raw_local_irq_restore(flags);
 
 	return obj;

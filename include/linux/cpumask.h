@@ -324,6 +324,10 @@ unsigned int __pure cpumask_next_wrap(int n, const struct cpumask *mask, int sta
 #define for_each_cpu_wrap(cpu, mask, start)				\
 	for_each_set_bit_wrap(cpu, cpumask_bits(mask), small_cpumask_bits, start)
 
+#define for_each_cpu_andnot_wrap(cpu, mask1, mask2, start)			\
+	for_each_andnot_wrap(cpu, cpumask_bits(mask1), cpumask_bits(mask2),	\
+			     small_cpumask_bits, start)
+
 /**
  * for_each_cpu_and - iterate over every cpu in both masks
  * @cpu: the (optionally unsigned) integer iterator

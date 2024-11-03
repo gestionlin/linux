@@ -487,6 +487,43 @@ unsigned long __for_each_wrap(const unsigned long *bitmap, unsigned long size,
 	return bit < start ? bit : size;
 }
 
+static inline
+unsigned long find_next_andnot_bit_wrap(const unsigned long *addr1,
+					const unsigned long *addr2,
+					unsigned long size, unsigned long offset)
+{
+	unsigned long bit = find_next_andnot_bit(addr1, addr2, size, offset);
+
+	if (bit < size || offset == 0)
+		return bit;
+
+	return find_next_andnot_bit(addr1, addr2, size, 0);
+}
+
+static inline
+unsigned long __for_each_andnot_wrap(const unsigned long *bitmap1,
+				     const unsigned long *bitmap2,
+				     unsigned long size,
+				     unsigned long start, unsigned long n)
+{
+	unsigned long bit;
+
+	/* If not wrapped around */
+	if (n > start) {
+		/* and have a bit, just return it. */
+		bit = find_next_andnot_bit(bitmap1, bitmap2, size, n);
+		if (bit < size)
+			return bit;
+
+		/* Otherwise, wrap around and ... */
+		n = 0;
+	}
+
+	/* Search the other part. */
+	bit = find_next_andnot_bit(bitmap1, bitmap2, start, n);
+	return bit < start ? bit : size;
+}
+
 /**
  * find_next_clump8 - find next 8-bit clump with set bits in a memory region
  * @clump: location to store copy of found clump
@@ -681,6 +718,11 @@ unsigned long find_next_bit_le(const void *addr, unsigned
 	for ((bit) = find_next_bit_wrap((addr), (size), (start));		\
 	     (bit) < (size);							\
 	     (bit) = __for_each_wrap((addr), (size), (start), (bit) + 1))
+
+#define for_each_andnot_wrap(bit, addr1, addr2, size, start) \
+	for ((bit) = find_next_andnot_bit_wrap((addr1), (addr2), (size), (start));		\
+	     (bit) < (size);									\
+	     (bit) = __for_each_andnot_wrap((addr1), (addr2), (size), (start), (bit) + 1))	\
 
 /**
  * for_each_set_clump8 - iterate over bitmap for each 8-bit clump with set bits
