@@ -319,43 +319,83 @@ static void page_pool_uninit(struct page_pool *pool)
 #endif
 }
 
-static void page_pool_item_init(struct page_pool *pool, unsigned int item_cnt)
+#define ITEMS_PER_PAGE	(PAGE_SIZE -					\
+			 offsetof(struct page_pool_item_block, items)) /\
+			sizeof(struct page_pool_item)
+
+static void __page_pool_item_init(struct page_pool *pool, struct page *page)
 {
-	struct page_pool_item *items = pool->items;
+	struct page_pool_item_block *block = page_address(page);
+	struct page_pool_item *items = block->items;
 	unsigned int i;
 
-	WARN_ON_ONCE(!is_power_of_2(item_cnt));
+	list_add(&block->list, &pool->item_blocks);
+	block->pp = pool;
 
-	for (i = 0; i < item_cnt; i++)
-		items[i].pp_idx = i;
-
-	pool->item_mask = item_cnt - 1;
+	for (i = 0; i < ITEMS_PER_PAGE; i++) {
+		items[i].state = PAGE_POOL_ITEM_UNUSED;
+		 __llist_add(&items[i].lentry, &pool->hold_items);
+	}
 }
 
-static void page_pool_item_uninit(struct page_pool *pool)
+static int page_pool_item_init(struct page_pool *pool, int item_cnt)
 {
-	struct page_pool_item *items = pool->items;
-	unsigned int mask = pool->item_mask;
-	unsigned int i, unmapped = 0;
+	struct page_pool_item_block *block;
+
+	INIT_LIST_HEAD(&pool->item_blocks);
+	init_llist_head(&pool->hold_items);
+	init_llist_head(&pool->release_items);
+
+	while (item_cnt > 0) {
+		struct page *page;
+
+		page = alloc_pages_node(pool->p.nid, GFP_KERNEL, 0);
+		if (!page)
+			goto err;
+
+		__page_pool_item_init(pool, page);
+		item_cnt -= ITEMS_PER_PAGE;
+	}
+
+	return 0;
+err:
+	list_for_each_entry(block, &pool->item_blocks, list)
+		put_page(virt_to_page(block));
+
+	return -ENOMEM;
+}
+
+static void page_pool_item_unmap(struct page_pool *pool)
+{
+	struct page_pool_item_block *block;
+	unsigned int unmapped = 0;
 
 	if (!pool->dma_map || pool->mp_priv)
 		return;
 
 	spin_lock_bh(&pool->destroy_lock);
 
-	for (i = 0; i <= mask; i++) {
-		struct page *page;
+	list_for_each_entry(block, &pool->item_blocks, list) {
+		struct page_pool_item *items = block->items;
+		int i;
 
-		page = netmem_to_page(READ_ONCE(items[i].pp_netmem));
-		if (!page)
-			continue;
+		for (i = 0; i < ITEMS_PER_PAGE; i++) {
+			struct page *page;
 
-		unmapped++;
-		dma_unmap_page_attrs(pool->p.dev, page_pool_get_dma_addr(page),
-				     PAGE_SIZE << pool->p.order,
-				     pool->p.dma_dir, DMA_ATTR_SKIP_CPU_SYNC |
-				     DMA_ATTR_WEAK_ORDERING);
-		page_pool_set_dma_addr(page, 0);
+			if (items[i].state == PAGE_POOL_ITEM_UNUSED)
+				continue;
+
+			page = netmem_to_page(READ_ONCE(items[i].pp_netmem));
+			dma_unmap_page_attrs(pool->p.dev,
+					     page_pool_get_dma_addr(page),
+					     PAGE_SIZE << pool->p.order,
+					     pool->p.dma_dir,
+					     DMA_ATTR_SKIP_CPU_SYNC |
+					     DMA_ATTR_WEAK_ORDERING);
+			page_pool_set_dma_addr(page, 0);
+			unmapped++;
+		}
+
 	}
 
 	WARN_ONCE(page_pool_inflight(pool, false) != unmapped,
@@ -366,38 +406,45 @@ static void page_pool_item_uninit(struct page_pool *pool)
 	spin_unlock_bh(&pool->destroy_lock);
 }
 
+static void page_pool_item_uninit(struct page_pool *pool)
+{
+	struct page_pool_item_block *block;
+
+	list_for_each_entry(block, &pool->item_blocks, list)
+                put_page(virt_to_page(block));
+}
+
 static bool page_pool_item_add(struct page_pool *pool, netmem_ref netmem)
 {
-	struct page_pool_item *items = pool->items;
-	unsigned int mask = pool->item_mask;
-	unsigned int idx = pool->item_idx;
-	unsigned int i;
+	struct page_pool_item *item;
+	struct llist_node *node;
 
-	for (i = 0; i <= mask; i++) {
-		unsigned int mask_idx = idx++ & mask;
+	if (unlikely(llist_empty(&pool->hold_items))) {
+		pool->hold_items.first = llist_del_all(&pool->release_items);
 
-		if (!READ_ONCE(items[mask_idx].pp_netmem)) {
-			WRITE_ONCE(items[mask_idx].pp_netmem, netmem);
-			netmem_set_pp_item(netmem, &items[mask_idx]);
-			pool->item_idx = idx;
-			return true;
+		if (unlikely(llist_empty(&pool->hold_items))) {
+			alloc_stat_inc(pool, item_full);
+			return false;
 		}
 	}
 
-	pool->item_idx = idx;
-	alloc_stat_inc(pool, item_full);
-	return false;
+	node = pool->hold_items.first;
+	pool->hold_items.first = node->next;
+	item = llist_entry(node, struct page_pool_item, lentry);
+	item->pp_netmem = netmem;
+	item->state = 0;
+	netmem_set_pp_item(netmem, item);
+	return true;
 }
 
 static void page_pool_item_del(struct page_pool *pool, netmem_ref netmem)
 {
 	struct page_pool_item *item = netmem_to_page(netmem)->pp_item;
-	struct page_pool_item *items = pool->items;
-	unsigned int idx = item->pp_idx;
 
-	DEBUG_NET_WARN_ON_ONCE(items[idx].pp_netmem != netmem);
-	WRITE_ONCE(items[idx].pp_netmem, (netmem_ref)NULL);
+	DEBUG_NET_WARN_ON_ONCE(item->pp_netmem != netmem);
+	item->state = PAGE_POOL_ITEM_UNUSED;
 	netmem_set_pp_item(netmem, NULL);
+	llist_add(&item->lentry, &pool->release_items);
 }
 
 /**
@@ -414,9 +461,7 @@ page_pool_create_percpu(const struct page_pool_params *params, int cpuid)
 	struct page_pool *pool;
 	int err;
 
-	item_cnt = roundup_pow_of_two(item_cnt);
-	pool = kvzalloc_node(struct_size(pool, items, item_cnt), GFP_KERNEL,
-			     params->nid);
+	pool = kzalloc_node(sizeof(*pool), GFP_KERNEL, params->nid);
 	if (!pool)
 		return ERR_PTR(-ENOMEM);
 
@@ -424,19 +469,23 @@ page_pool_create_percpu(const struct page_pool_params *params, int cpuid)
 	if (err < 0)
 		goto err_free;
 
-	page_pool_item_init(pool, item_cnt);
-
-	err = page_pool_list(pool);
+	err = page_pool_item_init(pool, item_cnt);
 	if (err)
 		goto err_uninit;
 
+	err = page_pool_list(pool);
+	if (err)
+		goto err_item_uninit;
+
 	return pool;
 
+err_item_uninit:
+	page_pool_item_uninit(pool);
 err_uninit:
 	page_pool_uninit(pool);
 err_free:
 	pr_warn("%s() gave up with errno %d\n", __func__, err);
-	kvfree(pool);
+	kfree(pool);
 	return ERR_PTR(err);
 }
 EXPORT_SYMBOL(page_pool_create_percpu);
@@ -1136,6 +1185,7 @@ static void __page_pool_destroy(struct page_pool *pool)
 	if (pool->disconnect)
 		pool->disconnect(pool);
 
+	page_pool_item_uninit(pool);
 	page_pool_unlist(pool);
 	page_pool_uninit(pool);
 
@@ -1261,7 +1311,7 @@ void page_pool_destroy(struct page_pool *pool)
 	 */
 	synchronize_rcu();
 
-	page_pool_item_uninit(pool);
+	page_pool_item_unmap(pool);
 
 	page_pool_detached(pool);
 	pool->defer_start = jiffies;

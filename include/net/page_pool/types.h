@@ -144,9 +144,21 @@ struct page_pool_stats {
 };
 #endif
 
+#define PAGE_POOL_ITEM_UNUSED			0xdeadbeeful
+
 struct page_pool_item {
-	netmem_ref pp_netmem;
-	unsigned int pp_idx;
+	unsigned long state;
+
+	union {
+		netmem_ref pp_netmem;
+		struct llist_node lentry;
+	};
+};
+
+struct page_pool_item_block {
+	struct list_head list;
+	struct page_pool *pp;
+	struct page_pool_item items[];
 };
 
 /* The whole frag API block must stay within one cacheline. On 32-bit systems,
@@ -168,8 +180,7 @@ struct page_pool {
 
 	int cpuid;
 	u32 pages_state_hold_cnt;
-	unsigned int item_mask;
-	unsigned int item_idx;
+	struct llist_head hold_items;
 
 	bool has_init_callback:1;	/* slow::init_callback is set */
 	bool dma_map:1;			/* Perform DMA mapping */
@@ -231,6 +242,9 @@ struct page_pool {
 #endif
 	atomic_t pages_state_release_cnt;
 
+	struct list_head item_blocks;
+	struct llist_head release_items;
+
 	/* A page_pool is strictly tied to a single RX-queue being
 	 * protected by NAPI, due to above pp_alloc_cache. This
 	 * refcnt serves purpose is to simplify drivers error handling.
@@ -252,8 +266,6 @@ struct page_pool {
 		u32 napi_id;
 		u32 id;
 	} user;
-
-	struct page_pool_item items[] ____cacheline_aligned_in_smp;
 };
 
 struct page *page_pool_alloc_pages(struct page_pool *pool, gfp_t gfp);
