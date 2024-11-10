@@ -339,15 +339,19 @@ static void __page_pool_item_init(struct page_pool *pool, struct page *page)
 	}
 }
 
-static int page_pool_item_init(struct page_pool *pool, int item_cnt)
+static int page_pool_item_init(struct page_pool *pool)
 {
+#define PAGE_POOL_MIN_INFLIGHT_ITEMS		512
 	struct page_pool_item_block *block;
+	int item_cnt;
 
 	INIT_LIST_HEAD(&pool->item_blocks);
 	spin_lock_init(&pool->item_blocks_lock);
 	init_llist_head(&pool->hold_items);
 	init_llist_head(&pool->release_items);
 
+	item_cnt = pool->p.pool_size * 2 + PP_ALLOC_CACHE_SIZE +
+		PAGE_POOL_MIN_INFLIGHT_ITEMS;
 	while (item_cnt > 0) {
 		struct page *page;
 
@@ -532,9 +536,6 @@ static void page_pool_item_del(struct page_pool *pool, netmem_ref netmem)
 struct page_pool *
 page_pool_create_percpu(const struct page_pool_params *params, int cpuid)
 {
-#define PAGE_POOL_MIN_INFLIGHT_ITEMS		512
-	unsigned int item_cnt = (params->pool_size ? : 1024) +
-				PP_ALLOC_CACHE_SIZE + PAGE_POOL_MIN_INFLIGHT_ITEMS;
 	struct page_pool *pool;
 	int err;
 
@@ -546,7 +547,7 @@ page_pool_create_percpu(const struct page_pool_params *params, int cpuid)
 	if (err < 0)
 		goto err_free;
 
-	err = page_pool_item_init(pool, item_cnt);
+	err = page_pool_item_init(pool);
 	if (err)
 		goto err_uninit;
 
