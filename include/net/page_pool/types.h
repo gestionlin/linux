@@ -157,6 +157,7 @@ struct page_pool_item {
 
 struct page_pool_item_block {
 	struct list_head list;
+	refcount_t ref;
 	struct page_pool *pp;
 	struct page_pool_item items[];
 };
@@ -181,6 +182,8 @@ struct page_pool {
 	int cpuid;
 	u32 pages_state_hold_cnt;
 	struct llist_head hold_items;
+	struct page_pool_item_block *item_blk;
+	unsigned int item_blk_idx;
 
 	bool has_init_callback:1;	/* slow::init_callback is set */
 	bool dma_map:1;			/* Perform DMA mapping */
@@ -243,6 +246,7 @@ struct page_pool {
 	atomic_t pages_state_release_cnt;
 
 	struct list_head item_blocks;
+	spinlock_t item_blocks_lock;
 	struct llist_head release_items;
 
 	/* A page_pool is strictly tied to a single RX-queue being

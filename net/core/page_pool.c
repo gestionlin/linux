@@ -331,6 +331,7 @@ static void __page_pool_item_init(struct page_pool *pool, struct page *page)
 
 	list_add(&block->list, &pool->item_blocks);
 	block->pp = pool;
+	refcount_set(&block->ref, 0);
 
 	for (i = 0; i < ITEMS_PER_PAGE; i++) {
 		items[i].state = PAGE_POOL_ITEM_UNUSED;
@@ -343,6 +344,7 @@ static int page_pool_item_init(struct page_pool *pool, int item_cnt)
 	struct page_pool_item_block *block;
 
 	INIT_LIST_HEAD(&pool->item_blocks);
+	spin_lock_init(&pool->item_blocks_lock);
 	init_llist_head(&pool->hold_items);
 	init_llist_head(&pool->release_items);
 
@@ -414,6 +416,73 @@ static void page_pool_item_uninit(struct page_pool *pool)
                 put_page(virt_to_page(block));
 }
 
+static bool page_pool_item_blk_add(struct page_pool *pool, netmem_ref netmem)
+{
+	struct page_pool_item *item;
+
+	if (!pool->item_blk || pool->item_blk_idx >= ITEMS_PER_PAGE) {
+		struct page_pool_item_block *block;
+		struct page_pool_item *items;
+		struct page *page;
+		int i;
+
+		page = alloc_pages_node(pool->p.nid, GFP_ATOMIC | __GFP_NOWARN,
+					0);
+		if (!page)
+			return false;
+
+		block = page_address(page);
+		spin_lock_bh(&pool->item_blocks_lock);
+		list_add(&block->list, &pool->item_blocks);
+		spin_unlock_bh(&pool->item_blocks_lock);
+
+		block->pp = pool;
+		refcount_set(&block->ref, ITEMS_PER_PAGE);
+
+		items = block->items;
+		for (i = 0; i < ITEMS_PER_PAGE; i++)
+			items[i].state = PAGE_POOL_ITEM_UNUSED;
+
+		pool->item_blk = block;
+		pool->item_blk_idx = 0;
+	}
+
+	item = &pool->item_blk->items[pool->item_blk_idx++];
+	item->pp_netmem = netmem;
+	item->state = 0;
+	netmem_set_pp_item(netmem, item);
+	return true;
+}
+
+static void __page_pool_item_blk_del(struct page_pool *pool,
+				     struct page_pool_item_block *block)
+{
+	spin_lock_bh(&pool->item_blocks_lock);
+	list_del(&block->list);
+	spin_unlock_bh(&pool->item_blocks_lock);
+
+	put_page(virt_to_page(block));
+}
+
+static void page_pool_item_blk_free(struct page_pool *pool)
+{
+	struct page_pool_item_block *block = pool->item_blk;
+
+	if (!block || pool->item_blk_idx >= ITEMS_PER_PAGE)
+		return;
+
+	if (refcount_sub_and_test(ITEMS_PER_PAGE - pool->item_blk_idx,
+				  &block->ref))
+		__page_pool_item_blk_del(pool, block);
+}
+
+static void page_pool_item_blk_del(struct page_pool *pool,
+				   struct page_pool_item_block *block)
+{
+	if (refcount_dec_and_test(&block->ref))
+		__page_pool_item_blk_del(pool, block);
+}
+
 static bool page_pool_item_add(struct page_pool *pool, netmem_ref netmem)
 {
 	struct page_pool_item *item;
@@ -424,7 +493,7 @@ static bool page_pool_item_add(struct page_pool *pool, netmem_ref netmem)
 
 		if (unlikely(llist_empty(&pool->hold_items))) {
 			alloc_stat_inc(pool, item_full);
-			return false;
+			return page_pool_item_blk_add(pool, netmem);
 		}
 	}
 
@@ -440,11 +509,19 @@ static bool page_pool_item_add(struct page_pool *pool, netmem_ref netmem)
 static void page_pool_item_del(struct page_pool *pool, netmem_ref netmem)
 {
 	struct page_pool_item *item = netmem_to_page(netmem)->pp_item;
+	struct page_pool_item_block *block;
 
 	DEBUG_NET_WARN_ON_ONCE(item->pp_netmem != netmem);
 	item->state = PAGE_POOL_ITEM_UNUSED;
 	netmem_set_pp_item(netmem, NULL);
-	llist_add(&item->lentry, &pool->release_items);
+
+	block = page_pool_item_to_block(item);
+	if (likely(!refcount_read(&block->ref))) {
+		llist_add(&item->lentry, &pool->release_items);
+		return;
+	}
+
+	page_pool_item_blk_del(pool, block);
 }
 
 /**
@@ -1308,6 +1385,7 @@ void page_pool_destroy(struct page_pool *pool)
 
 	page_pool_disable_direct_recycling(pool);
 	page_pool_free_frag(pool);
+	page_pool_item_blk_free(pool);
 
 	if (!page_pool_release(pool))
 		return;
