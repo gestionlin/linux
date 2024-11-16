@@ -373,25 +373,27 @@ err:
 
 static void page_pool_item_unmap(struct page_pool *pool)
 {
-	struct page_pool_item_block *block;
 	unsigned int unmapped = 0;
+	struct zone *zone;
 
 	if (!pool->dma_map || pool->mp_priv)
 		return;
 
+	get_online_mems();
 	spin_lock_bh(&pool->destroy_lock);
 
-	list_for_each_entry(block, &pool->item_blocks, list) {
-		struct page_pool_item *items = block->items;
-		int i;
+	for_each_populated_zone(zone) {
+		unsigned long start_pfn = zone->zone_start_pfn;
+		unsigned long end_pfn = zone_end_pfn(zone);
+		unsigned long pfn;
 
-		for (i = 0; i < ITEMS_PER_PAGE; i++) {
-			struct page *page;
+		for (pfn = start_pfn; pfn < end_pfn; pfn++) {
+			struct page *page = pfn_to_online_page(pfn);
 
-			if (items[i].state == PAGE_POOL_ITEM_UNUSED)
+			if (!page || !page_count(page) ||
+			    (page->pp_magic & ~0x3UL) != PP_SIGNATURE)
 				continue;
 
-			page = netmem_to_page(READ_ONCE(items[i].pp_netmem));
 			dma_unmap_page_attrs(pool->p.dev,
 					     page_pool_get_dma_addr(page),
 					     PAGE_SIZE << pool->p.order,
@@ -410,6 +412,7 @@ static void page_pool_item_unmap(struct page_pool *pool)
 
 	pool->dma_map = false;
 	spin_unlock_bh(&pool->destroy_lock);
+	put_online_mems();
 }
 
 static void page_pool_item_uninit(struct page_pool *pool)
