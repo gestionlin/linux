@@ -375,10 +375,13 @@ static void page_pool_item_unmap(struct page_pool *pool)
 {
 	unsigned int unmapped = 0;
 	struct zone *zone;
+	ktime_t start;
+	u64 duration;
 
 	if (!pool->dma_map || pool->mp_priv)
 		return;
 
+	start = ktime_get();
 	get_online_mems();
 	spin_lock_bh(&pool->destroy_lock);
 
@@ -406,9 +409,9 @@ static void page_pool_item_unmap(struct page_pool *pool)
 
 	}
 
-	WARN_ONCE(page_pool_inflight(pool, false) != unmapped,
-		  "page_pool(%u): unmapped(%u) != inflight page(%d)\n",
-		  pool->user.id, unmapped, page_pool_inflight(pool, false));
+	duration = (u64)ktime_us_delta(ktime_get(), start);
+	WARN(true, "page_pool(%u): unmapped(%u) != inflight page(%d) took %lluus\n",
+	     pool->user.id, unmapped, page_pool_inflight(pool, false), duration);
 
 	pool->dma_map = false;
 	spin_unlock_bh(&pool->destroy_lock);

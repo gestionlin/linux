@@ -364,6 +364,7 @@ static void page_pool_destroy_test_napi(void)
 
 static int __init page_pool_test_init(void)
 {
+	struct page *page;
 	ktime_t start;
 	u64 duration;
 	int ret;
@@ -382,6 +383,9 @@ static int __init page_pool_test_init(void)
 		ret = PTR_ERR(test_pool);
 		goto err_ptr_ring_init;
 	}
+
+	page = page_pool_dev_alloc_pages(test_pool);
+	goto out;
 
 	atomic_set(&nthreads, 2);
 	init_completion(&wait);
@@ -406,8 +410,11 @@ static int __init page_pool_test_init(void)
 		test_direct ? " direct" : "", test_dma ? " dma" : "",
 		test_frag ? " frag" : "", duration);
 
+out:
 	ptr_ring_cleanup(&ptr_ring, NULL);
 	page_pool_test_destroy(test_pool);
+
+	page_pool_put_full_page(test_pool, page, false);
 
 	if (test_napi)
 		page_pool_destroy_test_napi();
