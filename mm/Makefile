@@ -69,6 +69,7 @@ obj-y += init-mm.o
 obj-y += memblock.o
 obj-y += $(memory-hotplug-y)
 obj-y += slub.o
+obj-y += page_pcp.o
 
 ifdef CONFIG_MMU
 	obj-$(CONFIG_ADVISE_SYSCALLS)	+= madvise.o

@@ -62,6 +62,7 @@
 #include <linux/sysctl.h>
 #include "swap.h"
 #include "internal.h"
+#include "page_pcp.h"
 #include "ras/ras_event.h"
 
 static int sysctl_memory_failure_early_kill __read_mostly;
