@@ -25,6 +25,7 @@
 #include <linux/psi.h>
 #include <linux/cpuset.h>
 #include "internal.h"
+#include "page_pcp.h"
 
 #ifdef CONFIG_COMPACTION
 /*

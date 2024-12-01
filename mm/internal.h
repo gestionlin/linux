@@ -1488,4 +1488,154 @@ static inline void accept_page(struct page *page)
 }
 #endif /* CONFIG_UNACCEPTED_MEMORY */
 
+static inline int get_pfnblock_migratetype(const struct page *page,
+					   unsigned long pfn)
+{
+	return get_pfnblock_flags_mask(page, pfn, MIGRATETYPE_MASK);
+}
+
+void free_pcp_page(struct page *page, unsigned long pfn, struct zone *zone,
+		   unsigned int order, int mt);
+
+int rmqueue_bulk(struct zone *zone, unsigned int order, unsigned long count,
+		 struct list_head *list, int migratetype,
+		 unsigned int alloc_flags);
+
+static inline const char *page_bad_reason(struct page *page,
+					  unsigned long flags)
+{
+	const char *bad_reason = NULL;
+
+	if (unlikely(atomic_read(&page->_mapcount) != -1))
+		bad_reason = "nonzero mapcount";
+	if (unlikely(page->mapping != NULL))
+		bad_reason = "non-NULL mapping";
+	if (unlikely(page_ref_count(page) != 0))
+		bad_reason = "nonzero _refcount";
+	if (unlikely(page->flags & flags)) {
+		if (flags == PAGE_FLAGS_CHECK_AT_PREP)
+			bad_reason = "PAGE_FLAGS_CHECK_AT_PREP flag(s) set";
+		else
+			bad_reason = "PAGE_FLAGS_CHECK_AT_FREE flag(s) set";
+	}
+#ifdef CONFIG_MEMCG
+	if (unlikely(page->memcg_data))
+		bad_reason = "page still charged to cgroup";
+#endif
+#ifdef CONFIG_PAGE_POOL
+	if (unlikely((page->pp_magic & ~0x3UL) == PP_SIGNATURE))
+		bad_reason = "page_pool leak";
+#endif
+	return bad_reason;
+}
+
+static inline void bad_page(struct page *page, const char *reason)
+{
+	static unsigned long resume;
+	static unsigned long nr_shown;
+	static unsigned long nr_unshown;
+
+	/*
+	 * Allow a burst of 60 reports, then keep quiet for that minute;
+	 * or allow a steady drip of one report per second.
+	 */
+	if (nr_shown == 60) {
+		if (time_before(jiffies, resume)) {
+			nr_unshown++;
+			goto out;
+		}
+		if (nr_unshown) {
+			pr_alert(
+			      "BUG: Bad page state: %lu messages suppressed\n",
+				nr_unshown);
+			nr_unshown = 0;
+		}
+		nr_shown = 0;
+	}
+	if (nr_shown++ == 0)
+		resume = jiffies + 60 * HZ;
+
+	pr_alert("BUG: Bad page state in process %s  pfn:%05lx\n",
+		current->comm, page_to_pfn(page));
+	dump_page(page, reason);
+
+	print_modules();
+	dump_stack();
+out:
+	/* Leave bad fields for debug, except PageBuddy could make trouble */
+	if (PageBuddy(page))
+		__ClearPageBuddy(page);
+	add_taint(TAINT_BAD_PAGE, LOCKDEP_NOW_UNRELIABLE);
+}
+
+static inline void check_new_page_bad(struct page *page)
+{
+	if (unlikely(page->flags & __PG_HWPOISON)) {
+		/* Don't complain about hwpoisoned pages */
+		if (PageBuddy(page))
+			__ClearPageBuddy(page);
+		return;
+	}
+
+	bad_page(page,
+		 page_bad_reason(page, PAGE_FLAGS_CHECK_AT_PREP));
+}
+
+/*
+ * A bad page could be due to a number of fields. Instead of multiple branches,
+ * try and check multiple fields with one check. The caller must do a detailed
+ * check if necessary.
+ */
+static inline bool page_expected_state(struct page *page,
+					unsigned long check_flags)
+{
+	if (unlikely(atomic_read(&page->_mapcount) != -1))
+		return false;
+
+	if (unlikely((unsigned long)page->mapping |
+			page_ref_count(page) |
+#ifdef CONFIG_MEMCG
+			page->memcg_data |
+#endif
+#ifdef CONFIG_PAGE_POOL
+			((page->pp_magic & ~0x3UL) == PP_SIGNATURE) |
+#endif
+			(page->flags & check_flags)))
+		return false;
+
+	return true;
+}
+
+/*
+ * This page is about to be returned from the page allocator
+ */
+static inline bool check_new_page(struct page *page)
+{
+	if (likely(page_expected_state(page,
+				PAGE_FLAGS_CHECK_AT_PREP|__PG_HWPOISON)))
+		return false;
+
+	check_new_page_bad(page);
+	return true;
+}
+
+static inline bool is_check_pages_enabled(void)
+{
+	return static_branch_unlikely(&check_pages_enabled);
+}
+
+static inline bool check_new_pages(struct page *page, unsigned int order)
+{
+	if (is_check_pages_enabled()) {
+		for (int i = 0; i < (1 << order); i++) {
+			struct page *p = page + i;
+
+			if (check_new_page(p))
+				return true;
+		}
+	}
+
+	return false;
+}
+
 #endif	/* __MM_INTERNAL_H */
