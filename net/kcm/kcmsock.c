@@ -804,13 +804,17 @@ start:
 	while (msg_data_left(msg)) {
 		bool merge = true;
 		int i = skb_shinfo(skb)->nr_frags;
-		struct page_frag *pfrag = sk_page_frag(sk);
+		struct page_frag_cache *nc = sk_page_frag_cache(sk);
+		unsigned int nc_offset;
+		struct page *nc_page;
 
-		if (!sk_page_frag_refill(sk, pfrag))
+		if (!sk_page_frag_cache_refill(sk, nc))
 			goto wait_for_memory;
 
-		if (!skb_can_coalesce(skb, i, pfrag->page,
-				      pfrag->offset)) {
+		nc_page = page_frag_cache_page(nc);
+		nc_offset = page_frag_cache_offset(nc);
+		if (!skb_can_coalesce(skb, i, nc_page,
+				      nc_offset)) {
 			if (i == MAX_SKB_FRAGS) {
 				struct sk_buff *tskb;
 
@@ -851,14 +855,16 @@ start:
 			if (head != skb)
 				head->truesize += copy;
 		} else {
+			void *va;
+
 			copy = min_t(int, msg_data_left(msg),
-				     pfrag->size - pfrag->offset);
+				     page_frag_cache_remaining(nc));
 			if (!sk_wmem_schedule(sk, copy))
 				goto wait_for_memory;
 
+			va = page_frag_cache_virt(nc);
 			err = skb_copy_to_frag_nocache(sk, &msg->msg_iter, skb,
-						       page_address(pfrag->page) +
-						       pfrag->offset, copy);
+						       va, copy);
 			if (err)
 				goto out_error;
 
@@ -866,13 +872,13 @@ start:
 			if (merge) {
 				skb_frag_size_add(
 					&skb_shinfo(skb)->frags[i - 1], copy);
+				page_frag_cache_commit_noref(nc, copy);
 			} else {
-				skb_fill_page_desc(skb, i, pfrag->page,
-						   pfrag->offset, copy);
-				get_page(pfrag->page);
+				skb_fill_page_desc(skb, i, nc_page,
+						   nc_offset, copy);
+				page_frag_cache_commit(nc, copy);
 			}
 
-			pfrag->offset += copy;
 		}
 
 		copied += copy;
