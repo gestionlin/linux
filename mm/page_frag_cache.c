@@ -31,19 +31,9 @@ static unsigned long encoded_page_create(struct page *page, unsigned int order,
 		((unsigned long)pfmemalloc * PAGE_FRAG_CACHE_PFMEMALLOC_BIT);
 }
 
-static unsigned long encoded_page_decode_order(unsigned long encoded_page)
-{
-	return encoded_page & PAGE_FRAG_CACHE_ORDER_MASK;
-}
-
 static void *encoded_page_decode_virt(unsigned long encoded_page)
 {
 	return (void *)(encoded_page & PAGE_MASK);
-}
-
-static struct page *encoded_page_decode_page(unsigned long encoded_page)
-{
-	return virt_to_page((void *)encoded_page);
 }
 
 static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
