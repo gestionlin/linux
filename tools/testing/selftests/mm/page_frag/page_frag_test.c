@@ -100,12 +100,17 @@ static int page_frag_push_thread(void *arg)
 		if (!va)
 			continue;
 
-		ret = __ptr_ring_produce(ring, va);
-		if (ret) {
-			page_frag_free(va);
+		while (true) {
+			ret = __ptr_ring_produce(ring, va);
+			if (!ret) {
+				test_pushed++;
+				break;
+			} else if (force_exit) {
+				page_frag_free(va);
+				break;
+			}
+
 			cond_resched();
-		} else {
-			test_pushed++;
 		}
 	}
 
