@@ -46,11 +46,10 @@ static struct page *encoded_page_decode_page(unsigned long encoded_page)
 	return virt_to_page((void *)encoded_page);
 }
 
-static unsigned long __page_frag_cache_refill(struct page_frag_cache *nc,
-					      gfp_t gfp_mask)
+static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
+					     gfp_t gfp_mask)
 {
 	unsigned long order = PAGE_FRAG_CACHE_MAX_ORDER;
-	unsigned long encoded_page = 0;
 	struct page *page = NULL;
 	gfp_t gfp = gfp_mask;
 
@@ -65,23 +64,10 @@ static unsigned long __page_frag_cache_refill(struct page_frag_cache *nc,
 		order = 0;
 	}
 
-	if (likely(page)) {
-		encoded_page = encoded_page_create(page, order,
-						   page_is_pfmemalloc(page));
+	nc->encoded_page = page ?
+		encoded_page_create(page, order, page_is_pfmemalloc(page)) : 0;
 
-		/* Even if we own the page, we do not use atomic_set().
-		 * This would break get_page_unless_zero() users.
-		 */
-		page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
-
-		/* reset page count bias and offset to start of new frag */
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		nc->offset = 0;
-	}
-
-	nc->encoded_page = encoded_page;
-
-	return encoded_page;
+	return page;
 }
 
 void page_frag_cache_drain(struct page_frag_cache *nc)
@@ -114,9 +100,20 @@ void *__page_frag_cache_prepare(struct page_frag_cache *nc,
 
 	if (unlikely(!encoded_page)) {
 refill:
-		encoded_page = __page_frag_cache_refill(nc, gfp_mask);
-		if (unlikely(!encoded_page))
+		page = __page_frag_cache_refill(nc, gfp_mask);
+		if (!page)
 			return NULL;
+
+		encoded_page = nc->encoded_page;
+
+		/* Even if we own the page, we do not use atomic_set().
+		 * This would break get_page_unless_zero() users.
+		 */
+		page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
+
+		/* reset page count bias and offset to start of new frag */
+		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+		nc->offset = 0;
 	}
 
 	size = PAGE_SIZE << encoded_page_decode_order(encoded_page);
