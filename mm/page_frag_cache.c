@@ -95,45 +95,20 @@ void *__page_frag_alloc_align(struct page_frag_cache *nc,
 			      unsigned int align_mask)
 {
 	unsigned long encoded_page = nc->encoded_page;
-	unsigned int size, offset;
 	struct page *page;
 
-	if (unlikely(!encoded_page)) {
-refill:
-		page = __page_frag_cache_refill(nc, gfp_mask);
-		if (!page)
-			return NULL;
+	if (likely(encoded_page)) {
+		unsigned int size, offset;
 
-		encoded_page = nc->encoded_page;
-
-		/* Even if we own the page, we do not use atomic_set().
-		 * This would break get_page_unless_zero() users.
-		 */
-		page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
-
-		/* reset page count bias and offset to start of new frag */
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		nc->offset = 0;
-	}
-
-	size = PAGE_SIZE << encoded_page_decode_order(encoded_page);
-	offset = __ALIGN_KERNEL_MASK(nc->offset, ~align_mask);
-	if (unlikely(offset + fragsz > size)) {
-		if (unlikely(fragsz > PAGE_SIZE)) {
-			/*
-			 * The caller is trying to allocate a fragment
-			 * with fragsz > PAGE_SIZE but the cache isn't big
-			 * enough to satisfy the request, this may
-			 * happen in low memory conditions.
-			 * We don't release the cache page because
-			 * it could make memory pressure worse
-			 * so we simply return NULL here.
-			 */
-			return NULL;
+		size = PAGE_SIZE << encoded_page_decode_order(encoded_page);
+		offset = __ALIGN_KERNEL_MASK(nc->offset, ~align_mask);
+		if (likely(offset + fragsz <= size)) {
+			nc->offset = offset + fragsz;
+			nc->pagecnt_bias--;
+			return encoded_page_decode_virt(encoded_page) + offset;
 		}
 
 		page = encoded_page_decode_page(encoded_page);
-
 		if (!page_ref_sub_and_test(page, nc->pagecnt_bias))
 			goto refill;
 
@@ -145,16 +120,38 @@ refill:
 
 		/* OK, page count is 0, we can safely set it */
 		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
-
-		/* reset page count bias and offset to start of new frag */
-		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-		offset = 0;
+		goto out;
 	}
 
-	nc->pagecnt_bias--;
-	nc->offset = offset + fragsz;
+refill:
+	page = __page_frag_cache_refill(nc, gfp_mask);
+	if (unlikely(!page))
+		return NULL;
 
-	return encoded_page_decode_virt(encoded_page) + offset;
+	/* Even if we own the page, we do not use atomic_set().
+	 * This would break get_page_unless_zero() users.
+	 */
+	page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
+
+out:
+	/* reset page count bias and offset to start of new frag */
+	nc->offset = 0;
+	nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+
+	if (unlikely(fragsz > PAGE_SIZE)) {
+		/* The caller is trying to allocate a fragment with fragsz >
+		 * PAGE_SIZE but the cache isn't big enough to satisfy the
+		 * request, this may happen in low memory conditions. We don't
+		 * release the cache page because it could make memory pressure
+		 * worse so we simply return NULL here.
+		 */
+		return NULL;
+	}
+
+	nc->offset += fragsz;
+	nc->pagecnt_bias--;
+
+	return encoded_page_decode_virt(nc->encoded_page);
 }
 EXPORT_SYMBOL(__page_frag_alloc_align);
 
