@@ -67,17 +67,13 @@ static inline bool page_frag_cache_is_pfmemalloc(struct page_frag_cache *nc)
 
 void page_frag_cache_drain(struct page_frag_cache *nc);
 void __page_frag_cache_drain(struct page *page, unsigned int count);
-void *page_frag_cache_prepare(struct page_frag_cache *nc, unsigned int fragsz,
-			      struct page_frag *pfrag, gfp_t gfp_mask,
-			      unsigned int align_mask);
+void *__page_frag_cache_prepare(struct page_frag_cache *nc, unsigned int fragsz,
+				gfp_t gfp_mask, unsigned int align_mask);
 void *__page_frag_alloc_refill_probe_align(struct page_frag_cache *nc,
 					   unsigned int fragsz,
 					   struct page_frag *pfrag,
 					   unsigned int align_mask);
 
-void *__page_frag_alloc_align(struct page_frag_cache *nc, unsigned int fragsz,
-                              gfp_t gfp_mask, unsigned int align_mask);
-#if 0
 static inline void *page_frag_cache_prepare(struct page_frag_cache *nc,
 					    unsigned int fragsz,
 					    struct page_frag *pfrag,
@@ -127,7 +123,6 @@ static inline void *__page_frag_alloc_align(struct page_frag_cache *nc,
 
 	return va;
 }
-#endif
 
 /**
  * page_frag_alloc_align() - Allocate a page fragment with aligning requirement.

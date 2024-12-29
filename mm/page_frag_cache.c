@@ -84,9 +84,9 @@ void __page_frag_cache_drain(struct page *page, unsigned int count)
 }
 EXPORT_SYMBOL(__page_frag_cache_drain);
 
-static void *__page_frag_cache_prepare(struct page_frag_cache *nc,
-				       unsigned int fragsz, gfp_t gfp_mask,
-				       unsigned int align_mask)
+void *__page_frag_cache_prepare(struct page_frag_cache *nc,
+				unsigned int fragsz, gfp_t gfp_mask,
+				unsigned int align_mask)
 {
 	unsigned long encoded_page = nc->encoded_page;
 	struct page *page;
@@ -138,43 +138,7 @@ out:
 
 	return encoded_page_decode_virt(encoded_page);
 }
-
-
-void *page_frag_cache_prepare(struct page_frag_cache *nc, unsigned int fragsz,
-			      struct page_frag *pfrag, gfp_t gfp_mask,
-			      unsigned int align_mask)
-{
-        void *va;
-
-        va = __page_frag_cache_prepare(nc, fragsz, gfp_mask, align_mask);
-        if (likely(va)) {
-                unsigned long encoded_page = nc->encoded_page;
-
-                pfrag->page = encoded_page_decode_page(encoded_page);
-                pfrag->size =
-                        (PAGE_SIZE << encoded_page_decode_order(encoded_page)) -
-                        nc->offset;
-                pfrag->offset = nc->offset;
-        }
-
-        return va;
-}
-EXPORT_SYMBOL(page_frag_cache_prepare);
-
-void *__page_frag_alloc_align(struct page_frag_cache *nc, unsigned int fragsz,
-			      gfp_t gfp_mask, unsigned int align_mask)
-{
-        void *va;
-
-        va = __page_frag_cache_prepare(nc, fragsz, gfp_mask, align_mask);
-        if (likely(va)) {
-                nc->offset += fragsz;
-                nc->pagecnt_bias--;
-        }
-
-        return va;
-}
-EXPORT_SYMBOL(__page_frag_alloc_align);
+EXPORT_SYMBOL(__page_frag_cache_prepare);
 
 /**
  * __page_frag_alloc_refill_probe_align() - Probe allocating a fragment and
