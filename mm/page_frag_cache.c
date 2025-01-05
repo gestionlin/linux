@@ -90,9 +90,9 @@ void __page_frag_cache_drain(struct page *page, unsigned int count)
 }
 EXPORT_SYMBOL(__page_frag_cache_drain);
 
-void *__page_frag_alloc_align(struct page_frag_cache *nc,
-			      unsigned int fragsz, gfp_t gfp_mask,
-			      unsigned int align_mask)
+static bool __page_frag_cache_refill_align(struct page_frag_cache *nc,
+					   unsigned int fragsz, gfp_t gfp_mask,
+					   unsigned int align_mask)
 {
 	unsigned long encoded_page = nc->encoded_page;
 	struct page *page;
@@ -103,9 +103,8 @@ void *__page_frag_alloc_align(struct page_frag_cache *nc,
 		size = PAGE_SIZE << encoded_page_decode_order(encoded_page);
 		offset = __ALIGN_KERNEL_MASK(nc->offset, ~align_mask);
 		if (likely(offset + fragsz <= size)) {
-			nc->offset = offset + fragsz;
-			nc->pagecnt_bias--;
-			return encoded_page_decode_virt(encoded_page) + offset;
+			nc->offset = offset;
+			return true;
 		}
 
 		page = encoded_page_decode_page(encoded_page);
@@ -126,7 +125,7 @@ void *__page_frag_alloc_align(struct page_frag_cache *nc,
 refill:
 	page = __page_frag_cache_refill(nc, gfp_mask);
 	if (unlikely(!page))
-		return NULL;
+		return false;
 
 	/* Even if we own the page, we do not use atomic_set().
 	 * This would break get_page_unless_zero() users.
@@ -145,13 +144,26 @@ out:
 		 * release the cache page because it could make memory pressure
 		 * worse so we simply return NULL here.
 		 */
-		return NULL;
+		return false;
 	}
 
-	nc->offset += fragsz;
-	nc->pagecnt_bias--;
+	return true;
+}
 
-	return encoded_page_decode_virt(nc->encoded_page);
+void *__page_frag_alloc_align(struct page_frag_cache *nc,
+			      unsigned int fragsz, gfp_t gfp_mask,
+			      unsigned int align_mask)
+{
+	void *va = NULL;
+
+	if (likely(__page_frag_cache_refill_align(nc, fragsz, gfp_mask,
+						  align_mask))) {
+		va = encoded_page_decode_virt(nc->encoded_page) + nc->offset;
+		nc->offset += fragsz;
+		nc->pagecnt_bias--;
+	}
+
+	return va;
 }
 EXPORT_SYMBOL(__page_frag_alloc_align);
 
