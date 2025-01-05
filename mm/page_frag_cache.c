@@ -90,9 +90,10 @@ void __page_frag_cache_drain(struct page *page, unsigned int count)
 }
 EXPORT_SYMBOL(__page_frag_cache_drain);
 
-static bool __page_frag_cache_refill_align(struct page_frag_cache *nc,
-					   unsigned int fragsz, gfp_t gfp_mask,
-					   unsigned int align_mask)
+static inline bool __page_frag_cache_prepare(struct page_frag_cache *nc,
+					     unsigned int fragsz,
+					     gfp_t gfp_mask,
+					     unsigned int align_mask)
 {
 	unsigned long encoded_page = nc->encoded_page;
 	struct page *page;
@@ -119,51 +120,63 @@ static bool __page_frag_cache_refill_align(struct page_frag_cache *nc,
 
 		/* OK, page count is 0, we can safely set it */
 		set_page_count(page, PAGE_FRAG_CACHE_MAX_SIZE + 1);
-		goto out;
+		goto new_frag;
 	}
 
 refill:
 	page = __page_frag_cache_refill(nc, gfp_mask);
-	if (unlikely(!page))
-		return false;
+	if (likely(page)) {
 
-	/* Even if we own the page, we do not use atomic_set().
-	 * This would break get_page_unless_zero() users.
-	 */
-	page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
-
-out:
-	/* reset page count bias and offset to start of new frag */
-	nc->offset = 0;
-	nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
-
-	if (unlikely(fragsz > PAGE_SIZE)) {
-		/* The caller is trying to allocate a fragment with fragsz >
-		 * PAGE_SIZE but the cache isn't big enough to satisfy the
-		 * request, this may happen in low memory conditions. We don't
-		 * release the cache page because it could make memory pressure
-		 * worse so we simply return NULL here.
+		/* Even if we own the page, we do not use atomic_set().
+		 * This would break get_page_unless_zero() users.
 		 */
-		return false;
+		page_ref_add(page, PAGE_FRAG_CACHE_MAX_SIZE);
+
+new_frag:
+		/* reset page count bias and offset to start of new frag */
+		nc->offset = 0;
+		nc->pagecnt_bias = PAGE_FRAG_CACHE_MAX_SIZE + 1;
+
+		if (unlikely(fragsz > PAGE_SIZE)) {
+			/*
+			 * The caller is trying to allocate a fragment
+			 * with fragsz > PAGE_SIZE but the cache isn't big
+			 * enough to satisfy the request, this may
+			 * happen in low memory conditions.
+			 * We don't release the cache page because
+			 * it could make memory pressure worse
+			 * so we simply return NULL here.
+			 */
+			return false;
+		}
+		return true;
 	}
 
-	return true;
+	return false;
 }
+
+bool __page_frag_cache_refill_align(struct page_frag_cache *nc,
+				    unsigned int fragsz, gfp_t gfp_mask,
+				    unsigned int align_mask)
+{
+	return __page_frag_cache_prepare(nc, fragsz, gfp_mask, align_mask);
+}
+EXPORT_SYMBOL(__page_frag_cache_refill_align);
 
 void *__page_frag_alloc_align(struct page_frag_cache *nc,
 			      unsigned int fragsz, gfp_t gfp_mask,
 			      unsigned int align_mask)
 {
-	void *va = NULL;
+	if (likely(__page_frag_cache_prepare(nc, fragsz, gfp_mask,
+					     align_mask))) {
+		unsigned int offset = nc->offset;
 
-	if (likely(__page_frag_cache_refill_align(nc, fragsz, gfp_mask,
-						  align_mask))) {
-		va = encoded_page_decode_virt(nc->encoded_page) + nc->offset;
 		nc->offset += fragsz;
 		nc->pagecnt_bias--;
+		return encoded_page_decode_virt(nc->encoded_page) + offset;
 	}
 
-	return va;
+	return NULL;
 }
 EXPORT_SYMBOL(__page_frag_alloc_align);
 

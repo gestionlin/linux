@@ -42,6 +42,10 @@ void __page_frag_cache_drain(struct page *page, unsigned int count);
 void *__page_frag_alloc_align(struct page_frag_cache *nc, unsigned int fragsz,
 			      gfp_t gfp_mask, unsigned int align_mask);
 
+bool __page_frag_cache_refill_align(struct page_frag_cache *nc,
+                                   unsigned int fragsz, gfp_t gfp_mask,
+                                   unsigned int align_mask);
+
 static inline void *page_frag_alloc_align(struct page_frag_cache *nc,
 					  unsigned int fragsz, gfp_t gfp_mask,
 					  unsigned int align)
