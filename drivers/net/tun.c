@@ -1603,18 +1603,19 @@ static bool tun_can_build_skb(struct tun_struct *tun, struct tun_file *tfile,
 }
 
 static struct sk_buff *__tun_build_skb(struct tun_file *tfile,
-				       char *buf, int buflen, int len, int pad)
+				       struct page_frag_cache *nc, char *buf,
+				       int buflen, int len, int pad)
 {
 	struct sk_buff *skb = build_skb(buf, buflen);
 
-	if (!skb) {
-		page_frag_free(buf);
+	if (!skb)
 		return ERR_PTR(-ENOMEM);
-	}
 
 	skb_reserve(skb, pad);
 	skb_put(skb, len);
 	skb_set_owner_w(skb, tfile->socket.sk);
+
+	page_frag_cache_commit(nc, buflen);
 
 	return skb;
 }
@@ -1679,16 +1680,14 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 	buflen += SKB_DATA_ALIGN(len + pad);
 	rcu_read_unlock();
 
-	buf = page_frag_alloc_align(nc, buflen, GFP_KERNEL,
-				    SMP_CACHE_BYTES);
-	if (unlikely(!buf))
+	if (unlikely(!page_frag_cache_refill_align(nc, buflen, GFP_KERNEL,
+						   SMP_CACHE_BYTES)))
 		return ERR_PTR(-ENOMEM);
 
+	buf = page_frag_cache_virt(nc);
 	copied = copy_from_iter(buf + pad, len, from);
-	if (copied != len) {
-		page_frag_alloc_abort(nc, buf, buflen);
+	if (copied != len)
 		return ERR_PTR(-EFAULT);
-	}
 
 	/* There's a small window that XDP may be set after the check
 	 * of xdp_prog above, this should be rare and for simplicity
@@ -1696,7 +1695,7 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 	 */
 	if (hdr->gso_type || !xdp_prog) {
 		*skb_xdp = 1;
-		return __tun_build_skb(tfile, buf, buflen, len, pad);
+		return __tun_build_skb(tfile, nc, buf, buflen, len, pad);
 	}
 
 	*skb_xdp = 0;
@@ -1713,23 +1712,20 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 		xdp_prepare_buff(&xdp, buf, pad, len, false);
 
 		act = bpf_prog_run_xdp(xdp_prog, &xdp);
+		if (act == XDP_REDIRECT || act == XDP_TX)
+			page_frag_cache_commit(nc, buflen);
+
 		err = tun_xdp_act(tun, xdp_prog, &xdp, act);
 		if (err < 0) {
-			if (act == XDP_REDIRECT || act == XDP_TX) {
-				page_frag_alloc_abort_ref(nc, buf, buflen);
-				goto out;
-			}
-
-			page_frag_alloc_abort(nc, buf, buflen);
+			if (act == XDP_REDIRECT || act == XDP_TX)
+				nc->pagecnt_bias++;
 			goto out;
 		}
 
 		if (err == XDP_REDIRECT)
 			xdp_do_flush();
-		if (err != XDP_PASS) {
-			page_frag_alloc_abort(nc, buf, buflen);
+		if (err != XDP_PASS)
 			goto out;
-		}
 
 		pad = xdp.data - xdp.data_hard_start;
 		len = xdp.data_end - xdp.data;
@@ -1738,7 +1734,7 @@ static struct sk_buff *tun_build_skb(struct tun_struct *tun,
 	rcu_read_unlock();
 	local_bh_enable();
 
-	return __tun_build_skb(tfile, buf, buflen, len, pad);
+	return __tun_build_skb(tfile, nc, buf, buflen, len, pad);
 
 out:
 	bpf_net_ctx_clear(bpf_net_ctx);

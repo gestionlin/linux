@@ -1194,16 +1194,17 @@ new_segment:
 			bool merge = true;
 			int i = skb_shinfo(skb)->nr_frags;
 			struct page_frag_cache *nc = sk_page_frag_cache(sk);
-			struct page_frag page_frag, *pfrag;
+			unsigned int nc_offset;
+			struct page *nc_page;
 			void *va;
 
-			pfrag = &page_frag;
-			va = sk_page_frag_alloc_refill_prepare(sk, nc, pfrag);
-			if (!va)
+			if (!sk_page_frag_cache_refill(sk, nc))
 				goto wait_for_space;
 
-			if (!skb_can_coalesce(skb, i, pfrag->page,
-					      pfrag->offset)) {
+			nc_page = page_frag_cache_page(nc);
+			nc_offset = page_frag_cache_offset(nc);
+			if (!skb_can_coalesce(skb, i, nc_page,
+					      nc_offset)) {
 				if (i >= READ_ONCE(net_hotdata.sysctl_max_skb_frags)) {
 					tcp_mark_push(tp, skb);
 					goto new_segment;
@@ -1211,7 +1212,7 @@ new_segment:
 				merge = false;
 			}
 
-			copy = min_t(int, copy, pfrag->size);
+			copy = min_t(int, copy, page_frag_cache_remaining(nc));
 
 			if (unlikely(skb_zcopy_pure(skb) || skb_zcopy_managed(skb))) {
 				if (tcp_downgrade_zcopy_pure(sk, skb))
@@ -1223,6 +1224,7 @@ new_segment:
 			if (!copy)
 				goto wait_for_space;
 
+			va = page_frag_cache_virt(nc);
 			err = skb_copy_to_frag_nocache(sk, &msg->msg_iter, skb,
 						       va, copy);
 			if (unlikely(err))
@@ -1231,11 +1233,11 @@ new_segment:
 			/* Update the skb. */
 			if (merge) {
 				skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
-				page_frag_refill_commit_noref(nc, pfrag, copy);
+				page_frag_cache_commit_noref(nc, copy);
 			} else {
-				skb_fill_page_desc(skb, i, pfrag->page,
-						   pfrag->offset, copy);
-				page_frag_refill_commit(nc, pfrag, copy);
+				skb_fill_page_desc(skb, i, nc_page,
+						   nc_offset, copy);
+				page_frag_cache_commit(nc, copy);
 			}
 		} else if (zc == MSG_ZEROCOPY)  {
 			/* First append to a fragless skb builds initial

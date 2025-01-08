@@ -3055,33 +3055,16 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 }
 EXPORT_SYMBOL(skb_page_frag_refill);
 
-bool sk_page_frag_refill_prepare(struct sock *sk, struct page_frag_cache *nc,
-				 struct page_frag *pfrag)
+bool sk_page_frag_cache_refill(struct sock *sk, struct page_frag_cache *nc)
 {
-	if (likely(page_frag_refill_prepare(nc, 32U, pfrag, sk->sk_allocation)))
+	if (likely(page_frag_cache_refill(nc, 32U, sk->sk_allocation)))
 		return true;
 
 	sk_enter_memory_pressure(sk);
 	sk_stream_moderate_sndbuf(sk);
 	return false;
 }
-EXPORT_SYMBOL(sk_page_frag_refill_prepare);
-
-void *sk_page_frag_alloc_refill_prepare(struct sock *sk,
-					struct page_frag_cache *nc,
-					struct page_frag *pfrag)
-{
-	void *va;
-
-	va = page_frag_alloc_refill_prepare(nc, 32U, pfrag, sk->sk_allocation);
-	if (likely(va))
-		return va;
-
-	sk_enter_memory_pressure(sk);
-	sk_stream_moderate_sndbuf(sk);
-	return NULL;
-}
-EXPORT_SYMBOL(sk_page_frag_alloc_refill_prepare);
+EXPORT_SYMBOL(sk_page_frag_cache_refill);
 
 void __lock_sock(struct sock *sk)
 	__releases(&sk->sk_lock.slock)

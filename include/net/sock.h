@@ -2523,12 +2523,7 @@ static inline struct page_frag_cache *sk_page_frag_cache(struct sock *sk)
 	return &sk->sk_frag;
 }
 
-bool sk_page_frag_refill_prepare(struct sock *sk, struct page_frag_cache *nc,
-				 struct page_frag *pfrag);
-
-void *sk_page_frag_alloc_refill_prepare(struct sock *sk,
-					struct page_frag_cache *nc,
-					struct page_frag *pfrag);
+bool sk_page_frag_cache_refill(struct sock *sk, struct page_frag_cache *nc);
 
 /*
  *	Default write policy as shown to user space via poll/select/SIGIO

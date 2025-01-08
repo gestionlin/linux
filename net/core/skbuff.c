@@ -3077,27 +3077,27 @@ static bool spd_fill_linear_page(struct splice_pipe_desc *spd,
 				 unsigned int *len, struct sock *sk)
 {
 	struct page_frag_cache *nc = sk_page_frag_cache(sk);
-	struct page_frag page_frag, *pfrag;
+	unsigned int nc_offset;
+	struct page *nc_page;
 	void *va;
 
-	pfrag = &page_frag;
-	va = sk_page_frag_alloc_refill_prepare(sk, nc, pfrag);
-	if (!va)
+	if (!sk_page_frag_cache_refill(sk, nc))
 		return true;
 
-	*len = min_t(unsigned int, *len, pfrag->size);
+	*len = min_t(unsigned int, *len, page_frag_cache_remaining(nc));
+	va = page_frag_cache_virt(nc);
 	memcpy(va, page_address(page) + offset, *len);
 
-	if (spd_can_coalesce(spd, pfrag->page, pfrag->offset)) {
+	if (spd_can_coalesce(spd, nc_page, nc_offset)) {
 		spd->partial[spd->nr_pages - 1].len += *len;
-		page_frag_refill_commit_noref(nc, pfrag, *len);
+		page_frag_cache_commit_noref(nc, *len);
 		return false;
 	}
 
-	page_frag_refill_commit(nc, pfrag, *len);
-	spd->pages[spd->nr_pages] = pfrag->page;
+	page_frag_cache_commit(nc, *len);
+	spd->pages[spd->nr_pages] = nc_page;
 	spd->partial[spd->nr_pages].len = *len;
-	spd->partial[spd->nr_pages].offset = pfrag->offset;
+	spd->partial[spd->nr_pages].offset = nc_offset;
 	spd->nr_pages++;
 
 	return false;
