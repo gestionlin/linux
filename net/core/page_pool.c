@@ -810,6 +810,11 @@ static bool page_pool_napi_local(const struct page_pool *pool)
 	if (READ_ONCE(pool->cpuid) == cpuid)
 		return true;
 
+	/* The in_softirq() checking above should ensure RCU-bh read-side
+	 * critical section, which is paired with the rcu sync in
+	 * page_pool_destroy().
+	 */
+	DEBUG_NET_WARN_ON_ONCE(!rcu_read_lock_bh_held());
 	napi = READ_ONCE(pool->p.napi);
 
 	return napi && READ_ONCE(napi->list_owner) == cpuid;
@@ -1125,6 +1130,12 @@ void page_pool_destroy(struct page_pool *pool)
 
 	if (!page_pool_release(pool))
 		return;
+
+	/* Paired with RCU-bh read-side critical section to enable clearing
+	 * of pool->p.napi in page_pool_disable_direct_recycling() is seen
+	 * before returning to driver to free the napi instance.
+	 */
+	synchronize_net();
 
 	page_pool_detached(pool);
 	pool->defer_start = jiffies;
