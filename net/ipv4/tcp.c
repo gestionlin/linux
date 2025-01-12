@@ -1193,13 +1193,13 @@ new_segment:
 		if (zc == 0) {
 			bool merge = true;
 			int i = skb_shinfo(skb)->nr_frags;
-			struct page_frag *pfrag = (struct page_frag *)sk_page_frag_cache(sk);
+			struct page_frag_cache *nc = sk_page_frag_cache(sk);
 
-			if (!sk_page_frag_refill(sk, pfrag))
+			if (unlikely(!sk_page_frag_cache_refill(sk, nc)))
 				goto wait_for_space;
 
-			if (!skb_can_coalesce(skb, i, pfrag->page,
-					      pfrag->offset)) {
+			if (!skb_can_coalesce(skb, i, encoded_page_decode_page(nc->encoded_page),
+					      nc->offset)) {
 				if (i >= READ_ONCE(net_hotdata.sysctl_max_skb_frags)) {
 					tcp_mark_push(tp, skb);
 					goto new_segment;
@@ -1207,21 +1207,21 @@ new_segment:
 				merge = false;
 			}
 
-			copy = min_t(int, copy, pfrag->size - pfrag->offset);
-
-			if (unlikely(skb_zcopy_pure(skb) || skb_zcopy_managed(skb))) {
+			if (skb_zcopy_pure(skb) || skb_zcopy_managed(skb)) {
 				if (tcp_downgrade_zcopy_pure(sk, skb))
 					goto wait_for_space;
 				skb_zcopy_downgrade_managed(skb);
 			}
 
+			copy = min_t(int, copy, page_frag_cache_remaining(nc));
 			copy = tcp_wmem_schedule(sk, copy);
 			if (!copy)
 				goto wait_for_space;
 
+			//pr_err_ratelimited("tcp send %zd\n", copy);
 			err = skb_copy_to_frag_nocache(sk, &msg->msg_iter, skb,
-						       page_address(pfrag->page) +
-						       pfrag->offset, copy);
+						       encoded_page_decode_virt(nc->encoded_page) +
+						       nc->offset, copy);
 			if (err)
 				goto do_error;
 
@@ -1229,11 +1229,11 @@ new_segment:
 			if (merge) {
 				skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
 			} else {
-				skb_fill_page_desc(skb, i, pfrag->page,
-						   pfrag->offset, copy);
-				page_ref_inc(pfrag->page);
+				skb_fill_page_desc(skb, i, encoded_page_decode_page(nc->encoded_page),
+						   nc->offset, copy);
+				nc->pagecnt_bias--;
 			}
-			pfrag->offset += copy;
+			nc->offset += copy;
 		} else if (zc == MSG_ZEROCOPY)  {
 			/* First append to a fragless skb builds initial
 			 * pure zerocopy skb
