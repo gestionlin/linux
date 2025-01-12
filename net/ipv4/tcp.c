@@ -1193,17 +1193,13 @@ new_segment:
 		if (zc == 0) {
 			bool merge = true;
 			int i = skb_shinfo(skb)->nr_frags;
-			struct page_frag_cache *nc = sk_page_frag_cache(sk);
-			unsigned int nc_offset;
-			struct page *nc_page;
+			struct page_frag *pfrag = (struct page_frag *)sk_page_frag_cache(sk);
 
-			if (!sk_page_frag_cache_refill(sk, nc))
+			if (!sk_page_frag_refill(sk, pfrag))
 				goto wait_for_space;
 
-			nc_page = page_frag_cache_page(nc);
-			nc_offset = page_frag_cache_offset(nc);
-			if (!skb_can_coalesce(skb, i, nc_page,
-					      nc_offset)) {
+			if (!skb_can_coalesce(skb, i, pfrag->page,
+					      pfrag->offset)) {
 				if (i >= READ_ONCE(net_hotdata.sysctl_max_skb_frags)) {
 					tcp_mark_push(tp, skb);
 					goto new_segment;
@@ -1211,7 +1207,7 @@ new_segment:
 				merge = false;
 			}
 
-			copy = min_t(int, copy, page_frag_cache_remaining(nc));
+			copy = min_t(int, copy, pfrag->size - pfrag->offset);
 
 			if (unlikely(skb_zcopy_pure(skb) || skb_zcopy_managed(skb))) {
 				if (tcp_downgrade_zcopy_pure(sk, skb))
@@ -1224,8 +1220,8 @@ new_segment:
 				goto wait_for_space;
 
 			err = skb_copy_to_frag_nocache(sk, &msg->msg_iter, skb,
-						       encoded_page_decode_virt(nc->encoded_page) + nc_offset,
-						       copy);
+						       page_address(pfrag->page) +
+						       pfrag->offset, copy);
 			if (err)
 				goto do_error;
 
@@ -1233,11 +1229,11 @@ new_segment:
 			if (merge) {
 				skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
 			} else {
-				skb_fill_page_desc(skb, i, nc_page,
-						   nc_offset, copy);
-				nc->pagecnt_bias--;
+				skb_fill_page_desc(skb, i, pfrag->page,
+						   pfrag->offset, copy);
+				page_ref_inc(pfrag->page);
 			}
-			nc->offset += copy;
+			pfrag->offset += copy;
 		} else if (zc == MSG_ZEROCOPY)  {
 			/* First append to a fragless skb builds initial
 			 * pure zerocopy skb
@@ -3397,7 +3393,13 @@ int tcp_disconnect(struct sock *sk, int flags)
 
 	WARN_ON(inet->inet_num && !icsk->icsk_bind_hash);
 
-	page_frag_cache_drain(&sk->sk_frag);
+	if (sk->sk_frag.encoded_page & 0x3) {
+		page_frag_cache_drain(&sk->sk_frag);
+	} else if (sk->sk_frag.encoded_page) {
+		put_page((struct page*)sk->sk_frag.encoded_page);
+		sk->sk_frag.encoded_page = 0;
+		sk->sk_frag.offset = 0;
+	}
 	sk_error_report(sk);
 	return 0;
 }

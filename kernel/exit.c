@@ -973,7 +973,12 @@ void __noreturn do_exit(long code)
 	if (tsk->splice_pipe)
 		free_pipe_info(tsk->splice_pipe);
 
-	page_frag_cache_drain(&tsk->task_frag);
+	if (tsk->task_frag.encoded_page & 0x3) {
+		page_frag_cache_drain(&tsk->task_frag);
+	} else if (tsk->task_frag.encoded_page) {
+		put_page((struct page*)tsk->task_frag.encoded_page);
+		tsk->task_frag.encoded_page = 0;
+	}
 
 	exit_task_stack_account(tsk);
 

@@ -2523,6 +2523,7 @@ static inline struct page_frag_cache *sk_page_frag_cache(struct sock *sk)
 	return &sk->sk_frag;
 }
 
+bool sk_page_frag_refill(struct sock *sk, struct page_frag *pfrag);
 bool sk_page_frag_cache_refill(struct sock *sk, struct page_frag_cache *nc);
 
 /*

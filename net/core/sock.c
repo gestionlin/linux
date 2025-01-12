@@ -2292,7 +2292,12 @@ static void __sk_destruct(struct rcu_head *head)
 		pr_debug("%s: optmem leakage (%d bytes) detected\n",
 			 __func__, atomic_read(&sk->sk_omem_alloc));
 
-	page_frag_cache_drain(&sk->sk_frag);
+	if (sk->sk_frag.encoded_page & 0x3) {
+		page_frag_cache_drain(&sk->sk_frag);
+	} else if (sk->sk_frag.encoded_page) {
+		put_page((struct page*)sk->sk_frag.encoded_page);
+		sk->sk_frag.encoded_page = 0;
+	}
 
 	/* We do not need to acquire sk->sk_peer_lock, we are the last user. */
 	put_cred(sk->sk_peer_cred);
@@ -3054,6 +3059,17 @@ bool skb_page_frag_refill(unsigned int sz, struct page_frag *pfrag, gfp_t gfp)
 	return false;
 }
 EXPORT_SYMBOL(skb_page_frag_refill);
+
+bool sk_page_frag_refill(struct sock *sk, struct page_frag *pfrag)
+{
+	if (likely(skb_page_frag_refill(32U, pfrag, sk->sk_allocation)))
+		return true;
+
+	sk_enter_memory_pressure(sk);
+	sk_stream_moderate_sndbuf(sk);
+	return false;
+}
+EXPORT_SYMBOL(sk_page_frag_refill);
 
 bool sk_page_frag_cache_refill(struct sock *sk, struct page_frag_cache *nc)
 {
