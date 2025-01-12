@@ -1880,7 +1880,7 @@ static int mptcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 		 * anyway
 		 */
 		offset = dfrag->offset + dfrag->data_len;
-		psize = (PAGE_SIZE << encoded_page_decode_order(nc->encoded_page)) - offset;
+		psize = encoded_page_decode_size(nc->encoded_page) - offset;
 		psize = min_t(size_t, psize, msg_data_left(msg));
 		psize = min_t(size_t, psize, copy_limit);
 		total_ts = psize + frag_truesize;

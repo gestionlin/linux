@@ -12,7 +12,7 @@
 /* Use a full byte here to enable assembler optimization as the shift
  * operation is usually expecting a byte.
  */
-#define PAGE_FRAG_CACHE_ORDER_MASK		GENMASK(7, 0)
+#define PAGE_FRAG_CACHE_ORDER_MASK		GENMASK(0, 0)
 #else
 /* Compiler should be able to figure out we don't read things as any value
  * ANDed with 0 is 0.
@@ -27,9 +27,18 @@ static inline bool encoded_page_decode_pfmemalloc(unsigned long encoded_page)
 	return !!(encoded_page & PAGE_FRAG_CACHE_PFMEMALLOC_BIT);
 }
 
+#if 0
 static inline unsigned long encoded_page_decode_order(unsigned long encoded_page)
 {
-        return encoded_page & PAGE_FRAG_CACHE_ORDER_MASK;
+	static unsigned int orders[2] = {0, ilog2(PAGE_FRAG_CACHE_MAX_SIZE / PAGE_SIZE)};
+        return orders[encoded_page & PAGE_FRAG_CACHE_ORDER_MASK];
+}
+#endif
+
+static inline unsigned long encoded_page_decode_size(unsigned long encoded_page)
+{
+        static unsigned int sizes[2] = {PAGE_SIZE, PAGE_FRAG_CACHE_MAX_SIZE};
+        return sizes[encoded_page & PAGE_FRAG_CACHE_ORDER_MASK];
 }
 
 static inline void *encoded_page_decode_virt(unsigned long encoded_page)
@@ -59,8 +68,7 @@ static inline struct page *page_frag_cache_page(struct page_frag_cache *nc)
 
 static inline unsigned int page_frag_cache_remaining(struct page_frag_cache *nc)
 {
-	return (PAGE_SIZE << encoded_page_decode_order(nc->encoded_page)) -
-		nc->offset;
+	return encoded_page_decode_size(nc->encoded_page) - nc->offset;
 }
 
 static inline unsigned int page_frag_cache_offset(struct page_frag_cache *nc)

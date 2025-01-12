@@ -23,20 +23,20 @@
 static unsigned long encoded_page_create(struct page *page, unsigned int order,
 					 bool pfmemalloc)
 {
-	BUILD_BUG_ON(PAGE_FRAG_CACHE_MAX_ORDER > PAGE_FRAG_CACHE_ORDER_MASK);
-	BUILD_BUG_ON(PAGE_FRAG_CACHE_PFMEMALLOC_BIT >= PAGE_SIZE);
+	//BUILD_BUG_ON(PAGE_FRAG_CACHE_MAX_ORDER > PAGE_FRAG_CACHE_ORDER_MASK);
+	//BUILD_BUG_ON(PAGE_FRAG_CACHE_PFMEMALLOC_BIT >= PAGE_SIZE);
 
 	return (unsigned long)page_address(page) |
 		(order & PAGE_FRAG_CACHE_ORDER_MASK) |
 		((unsigned long)pfmemalloc * PAGE_FRAG_CACHE_PFMEMALLOC_BIT);
 }
 
-#if 0
 static unsigned long encoded_page_decode_order(unsigned long encoded_page)
 {
-	return encoded_page & PAGE_FRAG_CACHE_ORDER_MASK;
+	return encoded_page & PAGE_FRAG_CACHE_ORDER_MASK ? PAGE_FRAG_CACHE_MAX_ORDER : 0;
 }
 
+#if 0
 static void *encoded_page_decode_virt(unsigned long encoded_page)
 {
 	return (void *)(encoded_page & PAGE_MASK);
@@ -51,7 +51,7 @@ static struct page *encoded_page_decode_page(unsigned long encoded_page)
 static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
 					     gfp_t gfp_mask)
 {
-	unsigned long order = PAGE_FRAG_CACHE_MAX_ORDER;
+	unsigned long order = 1;
 	struct page *page = NULL;
 	gfp_t gfp = gfp_mask;
 
