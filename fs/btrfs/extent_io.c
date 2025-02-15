@@ -623,13 +623,26 @@ int btrfs_alloc_page_array(unsigned int nr_pages, struct page **page_array,
 			   bool nofail)
 {
 	const gfp_t gfp = nofail ? (GFP_NOFS | __GFP_NOFAIL) : GFP_NOFS;
-	unsigned int allocated;
+	unsigned int allocated, ret;
 
-	for (allocated = 0; allocated < nr_pages;) {
-		unsigned int last = allocated;
+	/* Defragment page_array so pages can be bulk allocated into remaining
+	 * NULL elements sequentially.
+	 */
+	for (allocated = 0, ret = 0; ret < nr_pages; ret++) {
+		if (page_array[ret]) {
+			page_array[allocated] = page_array[ret];
+			if (ret != allocated)
+				page_array[ret] = NULL;
 
-		allocated = alloc_pages_bulk(gfp, nr_pages, page_array);
-		if (unlikely(allocated == last)) {
+			allocated++;
+		}
+	}
+
+	while (allocated < nr_pages) {
+		ret = alloc_pages_bulk(gfp, nr_pages - allocated,
+				       page_array + allocated);
+		allocated += ret;
+		if (unlikely(!ret)) {
 			/* No progress, fail and do cleanup. */
 			for (int i = 0; i < allocated; i++) {
 				__free_page(page_array[i]);

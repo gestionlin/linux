@@ -663,9 +663,23 @@ static bool svc_alloc_arg(struct svc_rqst *rqstp)
 		pages = RPCSVC_MAXPAGES;
 	}
 
-	for (filled = 0; filled < pages; filled = ret) {
-		ret = alloc_pages_bulk(GFP_KERNEL, pages, rqstp->rq_pages);
-		if (ret > filled)
+	/* Defragment the rqstp->rq_pages so pages can be bulk allocated into
+	 * remaining NULL elements sequentially.
+	 */
+	for (filled = 0, ret = 0; ret < pages; ret++) {
+		if (rqstp->rq_pages[ret]) {
+			rqstp->rq_pages[filled] = rqstp->rq_pages[ret];
+			if (ret != filled)
+				rqstp->rq_pages[ret] = NULL;
+
+			filled++;
+		}
+	}
+
+	for (; filled < pages; filled += ret) {
+		ret = alloc_pages_bulk(GFP_KERNEL, pages - filled,
+				       rqstp->rq_pages + filled);
+		if (ret)
 			/* Made progress, don't sleep yet */
 			continue;
 
@@ -674,7 +688,7 @@ static bool svc_alloc_arg(struct svc_rqst *rqstp)
 			set_current_state(TASK_RUNNING);
 			return false;
 		}
-		trace_svc_alloc_arg_err(pages, ret);
+		trace_svc_alloc_arg_err(pages, filled);
 		memalloc_retry_wait(GFP_KERNEL);
 	}
 	rqstp->rq_page_end = &rqstp->rq_pages[pages];
