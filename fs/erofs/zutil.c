@@ -85,13 +85,13 @@ int z_erofs_gbuf_growsize(unsigned int nrpages)
 
 		for (j = 0; j < gbuf->nrpages; ++j)
 			tmp_pages[j] = gbuf->pages[j];
-		do {
-			last = j;
-			j = alloc_pages_bulk(GFP_KERNEL, nrpages,
-					     tmp_pages);
-			if (last == j)
+
+		for (last = j; last < nrpages; last += j) {
+			j = alloc_pages_bulk(GFP_KERNEL, nrpages - last,
+					     tmp_pages + last);
+			if (!j)
 				goto out;
-		} while (j != nrpages);
+		}
 
 		ptr = vmap(tmp_pages, nrpages, VM_MAP, PAGE_KERNEL);
 		if (!ptr)

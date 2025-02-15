@@ -626,10 +626,12 @@ int btrfs_alloc_page_array(unsigned int nr_pages, struct page **page_array,
 	unsigned int allocated;
 
 	for (allocated = 0; allocated < nr_pages;) {
-		unsigned int last = allocated;
+		unsigned int new_allocated;
 
-		allocated = alloc_pages_bulk(gfp, nr_pages, page_array);
-		if (unlikely(allocated == last)) {
+		new_allocated = alloc_pages_bulk(gfp, nr_pages - allocated,
+						 page_array + allocated);
+		allocated += new_allocated;
+		if (unlikely(!new_allocated)) {
 			/* No progress, fail and do cleanup. */
 			for (int i = 0; i < allocated; i++) {
 				__free_page(page_array[i]);
