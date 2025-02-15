@@ -225,6 +225,30 @@ unsigned long alloc_pages_bulk_mempolicy_noprof(gfp_t gfp,
 #define alloc_pages_bulk(_gfp, _nr_pages, _page_array)		\
 	__alloc_pages_bulk(_gfp, numa_mem_id(), NULL, _nr_pages, _page_array)
 
+static inline int alloc_pages_bulk_refill_noprof(gfp_t gfp, int nr_pages,
+						 struct page **page_array)
+{
+	int allocated = 0, i;
+
+	for (i = 0; i < nr_pages; i++) {
+		if (page_array[i]) {
+			swap(page_array[allocated], page_array[i]);
+			allocated++;
+		}
+	}
+
+	i = alloc_pages_bulk_noprof(gfp, numa_mem_id(), NULL,
+				    nr_pages - allocated,
+				    page_array + allocated);
+	if (likely(allocated + i == nr_pages))
+		return 0;
+
+	return i ? -EAGAIN : -ENOMEM;
+}
+
+#define alloc_pages_bulk_refill(...)				\
+	alloc_hooks(alloc_pages_bulk_refill_noprof(__VA_ARGS__))
+
 static inline unsigned long
 alloc_pages_bulk_node_noprof(gfp_t gfp, int nid, unsigned long nr_pages,
 				   struct page **page_array)
