@@ -244,6 +244,53 @@ unsigned long alloc_pages_bulk_mempolicy_noprof(gfp_t gfp,
 #define alloc_pages_bulk(_gfp, _nr_pages, _page_array)		\
 	__alloc_pages_bulk(_gfp, numa_mem_id(), NULL, _nr_pages, _page_array)
 
+/*
+ * alloc_pages_bulk_refill_noprof - Refill order-0 pages to an array
+ * @gfp: GFP flags for the allocation when refilling
+ * @nr_pages: The size of refilling array
+ * @page_array: The array to refill order-0 pages
+ *
+ * Note that only NULL elements are populated with pages and the pages might
+ * get re-ordered.
+ *
+ * Return 0 if all pages are refilled, -EAGAIN if at least one page is refilled,
+ * ok to try again immediately or -ENOMEM if no page is refilled and don't
+ * bother trying again soon.
+ */
+static inline int alloc_pages_bulk_refill_noprof(gfp_t gfp, int nr_pages,
+						 struct page **page_array)
+{
+	int allocated = 0, unallocated = nr_pages;
+	int ret;
+
+	/* Invariant: page_array[0..allocated-1] is all non-NULL
+	 *            page_array[unallocated..nr_pages-1] is all NULL
+	 */
+	while (allocated < unallocated) {
+		if (page_array[allocated])
+			allocated++;
+		else if (!page_array[unallocated-1])
+			unallocated--;
+		else {
+			page_array[allocated] = page_array[unallocated - 1];
+			page_array[unallocated - 1] = NULL;
+			allocated++;
+			unallocated --;
+		}
+	}
+
+	ret = alloc_pages_bulk_noprof(gfp, numa_mem_id(), NULL,
+				    nr_pages - allocated,
+				    page_array + allocated);
+	if (likely(allocated + ret == nr_pages))
+		return 0;
+
+	return ret ? -EAGAIN : -ENOMEM;
+}
+
+#define alloc_pages_bulk_refill(...)				\
+	alloc_hooks(alloc_pages_bulk_refill_noprof(__VA_ARGS__))
+
 static inline unsigned long
 alloc_pages_bulk_node_noprof(gfp_t gfp, int nid, unsigned long nr_pages,
 				   struct page **page_array)

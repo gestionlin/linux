@@ -653,12 +653,17 @@ static void svc_check_conn_limits(struct svc_serv *serv)
 static bool svc_alloc_arg(struct svc_rqst *rqstp)
 {
 	struct xdr_buf *arg = &rqstp->rq_arg;
-	unsigned long pages, filled, ret;
+	unsigned long pages;
+	int ret;
 
 	pages = rqstp->rq_maxpages;
-	for (filled = 0; filled < pages; filled = ret) {
-		ret = alloc_pages_bulk(GFP_KERNEL, pages, rqstp->rq_pages);
-		if (ret > filled)
+	while (true) {
+		ret = alloc_pages_bulk_refill(GFP_KERNEL, pages,
+					      rqstp->rq_pages);
+		if (!ret)
+			break;
+
+		if (ret == -EAGAIN)
 			/* Made progress, don't sleep yet */
 			continue;
 
